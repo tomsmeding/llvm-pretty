@@ -42,6 +42,8 @@ module Text.LLVM.AST
   , PrimType(..)
   , FloatType(..)
   , Type, Type'(..)
+  , AddrSpace(..)
+  , defaultAddrSpace
   , updateAliasesA, updateAliases
   , isFloatingPoint
   , isAlias
@@ -427,20 +429,14 @@ data Type' ident
   | Alias ident
   | Array Word64 (Type' ident)
   | FunTy (Type' ident) [Type' ident] Bool
-  | PtrTo (Type' ident)
+  | PtrTo (Type' ident) AddrSpace
     -- ^ A pointer to a memory location of a particular type. See also
     -- 'PtrOpaque', which represents a pointer without a pointee type.
-    --
-    -- LLVM pointers can also have an optional address space attribute, but this
-    -- is not currently represented in the @llvm-pretty@ AST.
-  | PtrOpaque
+  | PtrOpaque AddrSpace
     -- ^ A pointer to a memory location. Unlike 'PtrTo', a 'PtrOpaque' does not
     -- have a pointee type. Instead, instructions interacting through opaque
     -- pointers specify the type of the underlying memory they are interacting
     -- with.
-    --
-    -- LLVM pointers can also have an optional address space attribute, but this
-    -- is not currently represented in the @llvm-pretty@ AST.
     --
     -- 'PtrOpaque' should not be confused with 'Opaque', which is a completely
     -- separate type with a similar-sounding name.
@@ -456,6 +452,12 @@ data Type' ident
     -- separate type with a similar-sounding name.
     deriving (Data, Eq, Functor, Generic, Generic1, Ord, Show, Typeable)
 
+data AddrSpace = AddrSpace Word32
+    deriving (Data, Eq, Generic, Ord, Show, Typeable)
+
+defaultAddrSpace :: AddrSpace
+defaultAddrSpace = AddrSpace 0
+
 -- | Applicatively traverse a type, updating or removing aliases.
 updateAliasesA :: (Applicative f) => (a -> f (Type' b)) -> Type' a -> f (Type' b)
 updateAliasesA f = loop
@@ -463,8 +465,8 @@ updateAliasesA f = loop
   loop ty = case ty of
     Array len ety    -> Array len    <$> (loop ety)
     FunTy res ps var -> FunTy        <$> (loop res) <*> (traverse loop ps) <*> pure var
-    PtrTo pty        -> PtrTo        <$> (loop pty)
-    PtrOpaque        -> pure PtrOpaque
+    PtrTo pty addr   -> PtrTo        <$> (loop pty) <*> pure addr
+    PtrOpaque addr   -> pure (PtrOpaque addr)
     Struct fs        -> Struct       <$> (traverse loop fs)
     PackedStruct fs  -> PackedStruct <$> (traverse loop fs)
     Vector len ety   -> Vector       <$> pure len <*> (loop ety)
@@ -510,9 +512,9 @@ isArray ty = case ty of
   _         -> False
 
 isPointer :: Type -> Bool
-isPointer (PtrTo _) = True
-isPointer PtrOpaque = True
-isPointer _         = False
+isPointer PtrTo{}     = True
+isPointer PtrOpaque{} = True
+isPointer _           = False
 
 
 -- | Like `Type'`, but where the 'PtrTo' and 'PtrOpaque' constructors have been
@@ -545,8 +547,8 @@ data TypeView' ident
 -- | Convert a `Type'` value to a `TypeView'` value.
 typeView :: Type' ident -> TypeView' ident
 -- The two most important cases. Both forms of pointers are mapped to PtrView.
-typeView (PtrTo _)           = PtrView
-typeView PtrOpaque           = PtrView
+typeView PtrTo{}             = PtrView
+typeView PtrOpaque{}         = PtrView
 -- All other cases are straightforward.
 typeView (PrimType pt)       = PrimTypeView pt
 typeView (Alias lab)         = AliasView lab
@@ -592,12 +594,12 @@ fixupOpaquePtrs m
     = m
   where
     isOpaquePtr :: Type -> Bool
-    isOpaquePtr PtrOpaque = True
-    isOpaquePtr _         = False
+    isOpaquePtr PtrOpaque{} = True
+    isOpaquePtr _           = False
 
     opaquifyPtr :: Type -> Type
-    opaquifyPtr (PtrTo _) = PtrOpaque
-    opaquifyPtr t         = t
+    opaquifyPtr (PtrTo _ addr) = PtrOpaque addr
+    opaquifyPtr t              = t
 
     -- Find the first occurrence of a @b@ value within the @a@ value that
     -- satisfies the predicate and return it with 'Just'. Return 'Nothing' if there
@@ -627,7 +629,7 @@ floatTypeNull _        = error "must be a float type"
 typeNull :: Type -> NullResult lab
 typeNull (PrimType pt) = HasNull (primTypeNull pt)
 typeNull PtrTo{}       = HasNull ValNull
-typeNull PtrOpaque     = HasNull ValNull
+typeNull PtrOpaque{}   = HasNull ValNull
 typeNull (Alias i)     = ResolveNull i
 typeNull _             = HasNull ValZeroInit
 
@@ -642,8 +644,8 @@ elimAlias (Alias i) = return i
 elimAlias _         = mzero
 
 elimPtrTo :: MonadPlus m => Type -> m Type
-elimPtrTo (PtrTo ty) = return ty
-elimPtrTo _          = mzero
+elimPtrTo (PtrTo ty _) = return ty
+elimPtrTo _            = mzero
 
 elimVector :: MonadPlus m => Type -> m (Word64,Type)
 elimVector (Vector n pty) = return (n,pty)
@@ -668,7 +670,7 @@ elimFloatType _              = mzero
 elimSequentialType :: MonadPlus m => Type -> m Type
 elimSequentialType ty = case ty of
   Array _ elTy -> return elTy
-  PtrTo elTy   -> return elTy
+  PtrTo elTy _ -> return elTy
   Vector _ pty -> return pty
   _            -> mzero
 
@@ -724,7 +726,7 @@ data Declare = Declare
 
 -- | The function type of this declaration
 decFunType :: Declare -> Type
-decFunType Declare { .. } = PtrTo (FunTy decRetType decArgs decVarArgs)
+decFunType Declare { .. } = PtrTo (FunTy decRetType decArgs decVarArgs) defaultAddrSpace
 
 
 -- Function Definitions --------------------------------------------------------
@@ -746,7 +748,7 @@ data Define = Define
 
 defFunType :: Define -> Type
 defFunType Define { .. } =
-  PtrTo (FunTy defRetType (map typedType defArgs) defVarArgs)
+  PtrTo (FunTy defRetType (map typedType defArgs) defVarArgs) defaultAddrSpace
 
 addDefine :: Define -> Module -> Module
 addDefine d m = m { modDefines = d : modDefines m }

@@ -414,7 +414,7 @@ iT :: Word32 -> Type
 iT  = PrimType . Integer
 
 ptrT :: Type -> Type
-ptrT  = PtrTo
+ptrT  = \ty -> PtrTo ty defaultAddrSpace
 
 voidT :: Type
 voidT  = PrimType Void
@@ -618,7 +618,7 @@ shuffleVector vec1 vec2 mask =
     _          -> error "shuffleVector not given a vector"
 
 alloca :: Type -> Maybe (Typed Value) -> Maybe Int -> BB (Typed Value)
-alloca ty mb align = observe (PtrTo ty) (Alloca ty es align)
+alloca ty mb align = observe (PtrTo ty defaultAddrSpace) (Alloca ty es align)
   where
   es = fmap toValue `fmap` mb
 
@@ -628,8 +628,8 @@ load ty ptr ma = observe ty (Load ty (toValue `fmap` ptr) Nothing ma)
 store :: (IsValue a, IsValue b) => a -> Typed b -> Maybe Align -> BB ()
 store a ptr ma =
   case typedType ptr of
-    PtrTo ty -> effect (Store (ty -: a) (toValue `fmap` ptr) Nothing ma)
-    _        -> error "store not given a pointer"
+    PtrTo ty _ -> effect (Store (ty -: a) (toValue `fmap` ptr) Nothing ma)
+    _          -> error "store not given a pointer"
 
 nullPtr :: Type -> Typed Value
 nullPtr ty = ptrT ty =: ValNull
@@ -700,8 +700,8 @@ getelementptr ty ptr ixs = observe ty (GEP False ty (toValue `fmap` ptr) ixs)
 -- | Emit a call instruction, and generate a new variable for its result.
 call :: IsValue a => Typed a -> [Typed Value] -> BB (Typed Value)
 call sym vs = case typedType sym of
-  ty@(PtrTo (FunTy rty _ _)) -> observe rty (Call False ty (toValue sym) vs)
-  _                          -> error "invalid function type given to call"
+  ty@(PtrTo (FunTy rty _ _) _) -> observe rty (Call False ty (toValue sym) vs)
+  _                            -> error "invalid function type given to call"
 
 -- | Emit a call instruction, but don't generate a new variable for its result.
 call_ :: IsValue a => Typed a -> [Typed Value] -> BB ()
