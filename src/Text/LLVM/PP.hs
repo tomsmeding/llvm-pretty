@@ -293,13 +293,19 @@ ppType :: Fmt Type
 ppType (PrimType pt)     = ppPrimType pt
 ppType (Alias i)         = ppIdent i
 ppType (Array len ty)    = brackets (integral len <+> char 'x' <+> ppType ty)
-ppType (PtrTo ty)        = ppType ty <> char '*'
-ppType PtrOpaque         = "ptr"
+ppType (PtrTo ty addr)   = ppType ty <> ppSpAddrSpace addr <> char '*'
+ppType (PtrOpaque addr)  = "ptr" <> ppSpAddrSpace addr
 ppType (Struct ts)       = structBraces (commas (map ppType ts))
 ppType (PackedStruct ts) = angles (structBraces (commas (map ppType ts)))
 ppType (FunTy r as va)   = ppType r <> ppArgList va (map ppType as)
 ppType (Vector len pt)   = angles (integral len <+> char 'x' <+> ppType pt)
 ppType Opaque            = "opaque"
+
+-- | If the address space is default (0), print nothing; otherwise, print a
+-- space and then @addrspace(n)@.
+ppSpAddrSpace :: Fmt AddrSpace
+ppSpAddrSpace (AddrSpace 0) = mempty
+ppSpAddrSpace (AddrSpace n) = " addrspace(" <> integer (toInteger n) <> ")"
 
 ppTypeDecl :: Fmt TypeDecl
 ppTypeDecl td = ppIdent (typeName td) <+> char '='
