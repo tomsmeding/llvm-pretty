@@ -194,6 +194,7 @@ global :: GlobalAttrs -> Symbol -> Type -> Maybe Value -> LLVM (Typed Value)
 global attrs sym ty mbVal = emitGlobal Global
   { globalSym      = sym
   , globalType     = ty
+  , globalAddrSpace = defaultAddrSpace
   , globalValue    = toValue `fmap` mbVal
   , globalAttrs    = attrs
   , globalAlign    = Nothing

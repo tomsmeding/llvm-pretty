@@ -689,6 +689,7 @@ data Global = Global
   { globalSym      :: Symbol
   , globalAttrs    :: GlobalAttrs
   , globalType     :: Type
+  , globalAddrSpace :: AddrSpace
   , globalValue    :: Maybe Value
   , globalAlign    :: Maybe Align
   , globalMetadata :: GlobalMdAttachments
