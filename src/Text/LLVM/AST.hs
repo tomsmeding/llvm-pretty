@@ -689,7 +689,6 @@ data Global = Global
   { globalSym      :: Symbol
   , globalAttrs    :: GlobalAttrs
   , globalType     :: Type
-  , globalAddrSpace :: AddrSpace
   , globalValue    :: Maybe Value
   , globalAlign    :: Maybe Align
   , globalMetadata :: GlobalMdAttachments
@@ -701,6 +700,7 @@ addGlobal g m = m { modGlobals = g : modGlobals m }
 data GlobalAttrs = GlobalAttrs
   { gaLinkage    :: Maybe Linkage
   , gaVisibility :: Maybe Visibility
+  , gaAddrSpace  :: AddrSpace
   , gaConstant   :: Bool
   } deriving (Data, Eq, Generic, Ord, Show, Typeable)
 
@@ -708,6 +708,7 @@ emptyGlobalAttrs :: GlobalAttrs
 emptyGlobalAttrs  = GlobalAttrs
   { gaLinkage    = Nothing
   , gaVisibility = Nothing
+  , gaAddrSpace  = defaultAddrSpace
   , gaConstant   = False
   }
 

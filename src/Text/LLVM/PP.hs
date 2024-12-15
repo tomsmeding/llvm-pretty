@@ -317,7 +317,6 @@ ppTypeDecl td = ppIdent (typeName td) <+> char '='
 ppGlobal :: Fmt Global
 ppGlobal g = ppSymbol (globalSym g) <+> char '='
          <+> ppGlobalAttrs (isJust $ globalValue g) (globalAttrs g)
-         <+> ppAddrSpace (globalAddrSpace g)
          <+> ppType (globalType g) <+> ppMaybe ppValue (globalValue g)
           <> ppAlign (globalAlign g)
           <> ppAttachedMetadata (Map.toList (globalMetadata g))
@@ -331,7 +330,8 @@ ppGlobal g = ppSymbol (globalSym g) <+> char '='
 ppGlobalAttrs :: Bool -> Fmt GlobalAttrs
 ppGlobalAttrs hasValue ga
     -- LLVM 3.8 does not emit or parse linkage information w/ hidden visibility
-    | Just HiddenVisibility <- gaVisibility ga =
+    | llvmVer <= llvmV3_8
+    , Just HiddenVisibility <- gaVisibility ga =
             ppVisibility HiddenVisibility <+> constant
     | Just External <- gaLinkage ga
     , Just DefaultVisibility <- gaVisibility ga
@@ -346,8 +346,10 @@ ppGlobalAttrs hasValue ga
         --   * external scalar
         --   * external structure
         constant
-    | otherwise =
-        ppMaybe ppLinkage (gaLinkage ga) <+> ppMaybe ppVisibility (gaVisibility ga) <+> constant
+    | otherwise = ppMaybe ppLinkage (gaLinkage ga)
+              <+> ppAddrSpace (gaAddrSpace ga)
+              <+> ppMaybe ppVisibility (gaVisibility ga)
+              <+> constant
   where
   constant | gaConstant ga = "constant"
            | otherwise     = "global"
