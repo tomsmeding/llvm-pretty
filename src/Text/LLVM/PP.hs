@@ -406,6 +406,8 @@ ppFunAttr a =
     Alwaysinline    -> text "alwaysinline"
     Builtin         -> text "builtin"
     Cold            -> text "cold"
+    Convergent      -> onlyOnLLVM llvmV3_7 "Convergent" "convergent"
+    InaccessibleMemOnly -> onlyOnLLVM llvmV3_8 "InaccessibleMemOnly" "inaccessiblememonly"
     Inlinehint      -> text "inlinehint"
     Jumptable       -> text "jumptable"
     Minsize         -> text "minsize"

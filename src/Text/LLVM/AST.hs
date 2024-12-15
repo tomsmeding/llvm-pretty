@@ -762,6 +762,8 @@ data FunAttr
    | Alwaysinline
    | Builtin
    | Cold
+   | Convergent  -- ^ Introduced in LLVM 3.7
+   | InaccessibleMemOnly  -- ^ Introduced in LLVM 3.8
    | Inlinehint
    | Jumptable
    | Minsize
