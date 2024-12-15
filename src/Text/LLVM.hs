@@ -623,12 +623,12 @@ alloca ty mb align = observe (PtrTo ty defaultAddrSpace) (Alloca ty es align)
   es = fmap toValue `fmap` mb
 
 load :: IsValue a => Type -> Typed a -> Maybe Align -> BB (Typed Value)
-load ty ptr ma = observe ty (Load ty (toValue `fmap` ptr) Nothing ma)
+load ty ptr ma = observe ty (Load False ty (toValue `fmap` ptr) Nothing ma)
 
 store :: (IsValue a, IsValue b) => a -> Typed b -> Maybe Align -> BB ()
 store a ptr ma =
   case typedType ptr of
-    PtrTo ty _ -> effect (Store (ty -: a) (toValue `fmap` ptr) Nothing ma)
+    PtrTo ty _ -> effect (Store False (ty -: a) (toValue `fmap` ptr) Nothing ma)
     _          -> error "store not given a pointer"
 
 nullPtr :: Type -> Typed Value

@@ -592,8 +592,8 @@ ppInstr instr = case instr of
   Call tc ty f args      -> ppCall tc ty f args
   CallBr ty f args u es  -> ppCallBr ty f args u es
   Alloca ty len align    -> ppAlloca ty len align
-  Load ty ptr mo ma      -> ppLoad ty ptr mo ma
-  Store a ptr mo ma      -> ppStore a ptr mo ma
+  Load vol ty ptr mo ma  -> ppLoad vol ty ptr mo ma
+  Store vol a ptr mo ma  -> ppStore vol a ptr mo ma
   Fence scope order      -> "fence" <+> ppScope scope <+> ppAtomicOrdering order
   CmpXchg w v p a n s o o' -> "cmpxchg" <+> opt w "weak"
                          <+> opt v "volatile"
@@ -670,9 +670,14 @@ ppInstr instr = case instr of
   Resume tv           -> "resume" <+> ppTyped ppValue tv
   Freeze tv           -> "freeze" <+> ppTyped ppValue tv
 
-ppLoad :: Type -> Typed (Value' BlockLabel) -> Maybe AtomicOrdering -> Fmt (Maybe Align)
-ppLoad ty ptr mo ma =
-  "load" <+> (if isAtomic   then "atomic" else empty)
+ppLoad :: Bool
+       -> Type
+       -> Typed (Value' BlockLabel)
+       -> Maybe AtomicOrdering
+       -> Fmt (Maybe Align)
+ppLoad volatile ty ptr mo ma =
+  "load" <+> (if volatile then "volatile" else empty)
+         <+> (if isAtomic   then "atomic" else empty)
          <+> (if isExplicit then explicit else empty)
          <+> ppTyped ppValue ptr
          <+> ordering
@@ -690,12 +695,14 @@ ppLoad ty ptr mo ma =
 
   explicit = ppType ty <> comma
 
-ppStore :: Typed (Value' BlockLabel)
+ppStore :: Bool
+        -> Typed (Value' BlockLabel)
         -> Typed (Value' BlockLabel)
         -> Maybe AtomicOrdering
         -> Fmt (Maybe Align)
-ppStore ptr val mo ma =
-  "store" <+> (if isJust mo  then "atomic" else empty)
+ppStore volatile ptr val mo ma =
+  "store" <+> (if volatile then "volatile" else empty)
+          <+> (if isJust mo  then "atomic" else empty)
           <+> ppTyped ppValue ptr <> comma
           <+> ppTyped ppValue val
           <+> case mo of
