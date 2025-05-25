@@ -541,19 +541,19 @@ add :: (IsValue a, IsValue b) => Typed a -> b -> BB (Typed Value)
 add  = binop (Arith (Add False False))
 
 fadd :: (IsValue a, IsValue b) => Typed a -> b -> BB (Typed Value)
-fadd  = binop (Arith FAdd)
+fadd  = binop (Arith (FAdd []))
 
 sub :: (IsValue a, IsValue b) => Typed a -> b -> BB (Typed Value)
 sub  = binop (Arith (Sub False False))
 
 fsub :: (IsValue a, IsValue b) => Typed a -> b -> BB (Typed Value)
-fsub  = binop (Arith FSub)
+fsub  = binop (Arith (FSub []))
 
 mul :: (IsValue a, IsValue b) => Typed a -> b -> BB (Typed Value)
 mul  = binop (Arith (Mul False False))
 
 fmul :: (IsValue a, IsValue b) => Typed a -> b -> BB (Typed Value)
-fmul  = binop (Arith FMul)
+fmul  = binop (Arith (FMul []))
 
 udiv :: (IsValue a, IsValue b) => Typed a -> b -> BB (Typed Value)
 udiv  = binop (Arith (UDiv False))
@@ -562,7 +562,7 @@ sdiv :: (IsValue a, IsValue b) => Typed a -> b -> BB (Typed Value)
 sdiv  = binop (Arith (SDiv False))
 
 fdiv :: (IsValue a, IsValue b) => Typed a -> b -> BB (Typed Value)
-fdiv  = binop (Arith FDiv)
+fdiv  = binop (Arith (FDiv []))
 
 urem :: (IsValue a, IsValue b) => Typed a -> b -> BB (Typed Value)
 urem  = binop (Arith URem)
@@ -571,7 +571,7 @@ srem :: (IsValue a, IsValue b) => Typed a -> b -> BB (Typed Value)
 srem  = binop (Arith SRem)
 
 frem :: (IsValue a, IsValue b) => Typed a -> b -> BB (Typed Value)
-frem  = binop (Arith FRem)
+frem  = binop (Arith (FRem []))
 
 shl :: (IsValue a, IsValue b) => Typed a -> b -> BB (Typed Value)
 shl  = binop (Bit (Shl False False))
@@ -678,7 +678,7 @@ icmp :: (IsValue a, IsValue b) => ICmpOp -> Typed a -> b -> BB (Typed Value)
 icmp op l r = observe (iT 1) (ICmp op (toValue `fmap` l) (toValue r))
 
 fcmp :: (IsValue a, IsValue b) => FCmpOp -> Typed a -> b -> BB (Typed Value)
-fcmp op l r = observe (iT 1) (FCmp op (toValue `fmap` l) (toValue r))
+fcmp op l r = observe (iT 1) (FCmp [] op (toValue `fmap` l) (toValue r))
 
 data PhiArg = PhiArg Value BlockLabel
 
@@ -686,12 +686,12 @@ from :: IsValue a => a -> BlockLabel -> PhiArg
 from a = PhiArg (toValue a)
 
 phi :: Type -> [PhiArg] -> BB (Typed Value)
-phi ty vs = observe ty (Phi ty [ (v,l) | PhiArg v l <- vs ])
+phi ty vs = observe ty (Phi [] ty [ (v,l) | PhiArg v l <- vs ])
 
 select :: (IsValue a, IsValue b, IsValue c)
        => Typed a -> Typed b -> Typed c -> BB (Typed Value)
 select c t f = observe (typedType t)
-             $ Select (toValue `fmap` c) (toValue `fmap` t) (toValue f)
+             $ Select [] (toValue `fmap` c) (toValue `fmap` t) (toValue f)
 
 getelementptr :: IsValue a
               => Type -> Typed a -> [Typed Value] -> BB (Typed Value)
@@ -700,12 +700,12 @@ getelementptr ty ptr ixs = observe ty (GEP False ty (toValue `fmap` ptr) ixs)
 -- | Emit a call instruction, and generate a new variable for its result.
 call :: IsValue a => Typed a -> [Typed Value] -> BB (Typed Value)
 call sym vs = case typedType sym of
-  PtrTo ty@(FunTy rty _ _) _ -> observe rty (Call False ty (toValue sym) vs)
+  PtrTo ty@(FunTy rty _ _) _ -> observe rty (Call False [] ty (toValue sym) vs)
   _                          -> error "invalid function type given to call"
 
 -- | Emit a call instruction, but don't generate a new variable for its result.
 call_ :: IsValue a => Typed a -> [Typed Value] -> BB ()
-call_ sym vs = effect (Call False (typedType sym) (toValue sym) vs)
+call_ sym vs = effect (Call False [] (typedType sym) (toValue sym) vs)
 
 -- | Emit an invoke instruction, and generate a new variable for its result.
 invoke :: IsValue a =>

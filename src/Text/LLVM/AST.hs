@@ -116,6 +116,7 @@ module Text.LLVM.AST
   , isPhi
   , ICmpOp(..)
   , FCmpOp(..)
+  , FMF(..)
     -- * Values
   , Value'(..), Value
   , FP80Value(..)
@@ -879,7 +880,7 @@ data ArithOp
          * First boolean flag: check for unsigned overflow.
          * Second boolean flag: check for signed overflow.
          * If the checks fail, then the result is poisoned. -}
-  | FAdd
+  | FAdd [FMF]
     -- ^ Floating point addition.
 
   | Sub Bool Bool
@@ -888,7 +889,7 @@ data ArithOp
          * Second boolean flag: check for signed overflow.
          * If the checks fail, then the result is poisoned. -}
 
-  | FSub
+  | FSub [FMF]
     -- ^ Floating point subtraction.
 
   | Mul Bool Bool
@@ -897,7 +898,7 @@ data ArithOp
          * Second boolean flag: check for signed overflow.
          * If the checks fail, then the result is poisoned. -}
 
-  | FMul
+  | FMul [FMF]
     -- ^ Floating point multiplication.
 
   | UDiv Bool
@@ -910,7 +911,7 @@ data ArithOp
          * Boolean flag: check for exact result.
          * If the check fails, then the result is poisoned. -}
 
-  | FDiv
+  | FDiv [FMF]
     -- ^ Floating point division.
 
   | URem
@@ -922,7 +923,7 @@ data ArithOp
     --   * The sign of the reminder matches the divident (first parameter).
     --   * Division by 0 is undefined.
 
-  | FRem
+  | FRem [FMF]
     -- ^ * Floating point reminder resulting from floating point division.
     --   * The reminder has the same sign as the divident (first parameter).
 
@@ -942,7 +943,7 @@ isFArith :: ArithOp -> Bool
 isFArith  = not . isIArith
 
 data UnaryArithOp
-  = FNeg
+  = FNeg [FMF]
     -- ^ Floating point negation.
     deriving (Data, Eq, Generic, Ord, Show, Typeable)
 
@@ -1057,13 +1058,15 @@ data Instr' lab
   | Conv ConvOp (Typed (Value' lab)) Type
     {- ^ * Convert a value from one type to another.
          * Middle of basic block.
-         * The result matches the 3rd parameter. -}
+         * The result matches the 3rd parameter.
+         Note: fptrunc and fpext allow fast-math flags in LLVM, but this is not represented yet. -}
 
-  | Call Bool Type (Value' lab) [Typed (Value' lab)]
+  | Call Bool [FMF] Type (Value' lab) [Typed (Value' lab)]
     {- ^ * Call a function.
             The boolean is tail-call hint (XXX: needs to be updated)
          * Middle of basic block.
-         * The result is as indicated by the provided type. -}
+         * The result is as indicated by the provided type.
+         * Fast-math flags are only allowed if the type is a floating-point type; see LLVM documentation. -}
 
   | CallBr Type (Value' lab) [Typed (Value' lab)] lab [lab]
     {- ^ * Call a function in asm-goto style:
@@ -1142,16 +1145,17 @@ data Instr' lab
          * Middle of basic block.
          * Returns a boolean value. -}
 
-  | FCmp FCmpOp (Typed (Value' lab)) (Value' lab)
+  | FCmp [FMF] FCmpOp (Typed (Value' lab)) (Value' lab)
     {- ^ * Compare two floating point values.
          * Middle of basic block.
          * Returns a boolean value. -}
 
-  | Phi Type [(Value' lab,lab)]
+  | Phi [FMF] Type [(Value' lab,lab)]
     {- ^ * Join point for an SSA value: we get one value per predecessor
            basic block.
          * Middle of basic block.
-         * Returns a value of the specified type. -}
+         * Returns a value of the specified type.
+         * Fast-math flags are only allowed if the type is a floating-point type; see LLVM documentation. -}
 
   | GEP Bool Type (Typed (Value' lab)) [Typed (Value' lab)]
     {- ^ * "Get element pointer",
@@ -1169,11 +1173,12 @@ data Instr' lab
     a struct is field 0, the next one is 1, etc., regardless of the size
     of the fields in bytes). -}
 
-  | Select (Typed (Value' lab)) (Typed (Value' lab)) (Value' lab)
+  | Select [FMF] (Typed (Value' lab)) (Typed (Value' lab)) (Value' lab)
     {- ^ * Local if-then-else; the first argument is boolean, if
            true pick the 2nd argument, otherwise evaluate to the 3rd.
          * Middle of basic block.
-         * Returns either the 2nd or the 3rd argument. -}
+         * Returns either the 2nd or the 3rd argument.
+         * Fast-math flags are only allowed if the type is a floating-point type; see LLVM documentation.-}
 
   | ExtractValue (Typed (Value' lab)) [Int32]
     {- ^ * Get the value of a member of an aggregate value:
@@ -1331,6 +1336,18 @@ data ICmpOp = Ieq | Ine | Iugt | Iuge | Iult | Iule | Isgt | Isge | Islt | Isle
 data FCmpOp = Ffalse  | Foeq | Fogt | Foge | Folt | Fole | Fone
             | Ford    | Fueq | Fugt | Fuge | Fult | Fule | Fune
             | Funo    | Ftrue
+    deriving (Data, Eq, Enum, Generic, Ord, Show, Typeable)
+
+-- | Fast-math flags. <https://llvm.org/docs/LangRef.html#fast-math-flags>
+data FMF
+  = Ffast  -- ^ Short-hand for all other flags combined
+  | Fnnan  -- ^ No NaNs
+  | Fninf  -- ^ No infs
+  | Fnsz  -- ^ No signed zeros
+  | Farcp  -- ^ Allow reciprocal (a / b == a * (1.0 / b))
+  | Fcontract  -- ^ Allow contraction (e.g. fused multiply-add)
+  | Fafn  -- ^ Approximate functions (for sqrt, sin, log, etc.)
+  | Freassoc  -- ^ Reassociation (important for e.g. vectorisation of horizontal sums)
     deriving (Data, Eq, Enum, Generic, Ord, Show, Typeable)
 
 

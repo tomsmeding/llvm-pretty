@@ -25,7 +25,7 @@ instance HasLabel Instr' where
                                 <$> traverse (relabel f) l
                                 <*> relabel f r
   relabel f (Conv op l r)         = Conv op <$> traverse (relabel f) l <*> pure r
-  relabel f (Call t r n as)       = Call t r
+  relabel f (Call t fmf r n as)   = Call t fmf r
                                 <$> relabel f n
                                 <*> traverse (traverse (relabel f)) as
   relabel f (CallBr r n as u es)  = CallBr r
@@ -63,13 +63,13 @@ instance HasLabel Instr' where
   relabel f (ICmp op l r)         = ICmp op
                                 <$> traverse (relabel f) l
                                 <*> relabel f r
-  relabel f (FCmp op l r)         = FCmp op
+  relabel f (FCmp op fmf l r)     = FCmp op fmf
                                 <$> traverse (relabel f) l
                                 <*> relabel f r
   relabel f (GEP ib t a is)       = GEP ib t
                                 <$> traverse (relabel f) a
                                 <*> traverse (traverse (relabel f)) is
-  relabel f (Select c l r)        = Select
+  relabel f (Select fmf c l r)    = Select fmf
                                 <$> traverse (relabel f) c
                                 <*> traverse (relabel f) l <*> relabel f r
   relabel f (ExtractValue a is)   = ExtractValue
@@ -109,9 +109,9 @@ instance HasLabel Instr' where
   relabel f (Switch c d ls)       =
     let step (n,i) = (\l -> (n,l)) <$> f Nothing i
      in Switch <$> traverse (relabel f) c <*> f Nothing d <*> traverse step ls
-  relabel f (Phi t ls)            =
+  relabel f (Phi fmf t ls)        =
     let step (a,l) = (,) <$> relabel f a <*> f Nothing l
-     in Phi t <$> traverse step ls
+     in Phi fmf t <$> traverse step ls
 
   relabel f (LandingPad ty fn c cs) = LandingPad ty
                                   <$> traverse (traverse (relabel f)) fn

@@ -366,7 +366,7 @@ localVariableNameDeclarations mdMap def =
 
     aux :: [Stmt] -> Map Ident Ident -> Map Ident Ident
     aux ( Effect (Store False src dst _ _) _
-        : Effect (Call _ _ (ValSymbol (Symbol what)) [var,md,_]) _
+        : Effect (Call _ _ _ (ValSymbol (Symbol what)) [var,md,_]) _
         : _) sofar
       | what == "llvm.dbg.declare"
       , Just dstIdent <- extractIdent dst
@@ -376,7 +376,7 @@ localVariableNameDeclarations mdMap def =
       , Just name <- extractLvName md
       = Map.insert name srcIdent sofar
 
-    aux ( Effect (Call _ _ (ValSymbol (Symbol what)) [var,_,md,_]) _
+    aux ( Effect (Call _ _ _ (ValSymbol (Symbol what)) [var,_,md,_]) _
         : _) sofar
       | what == "llvm.dbg.value"
       , Just key  <- extractIdent var

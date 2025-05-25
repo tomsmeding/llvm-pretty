@@ -505,25 +505,38 @@ ppTyped fmt ty = ppType (typedType ty) <+> fmt (typedValue ty)
 ppSignBits :: Bool -> Fmt Bool
 ppSignBits nuw nsw = opt nuw "nuw" <+> opt nsw "nsw"
 
+ppFMF1 :: Fmt FMF
+ppFMF1 Ffast = "fast"
+ppFMF1 Fnnan = "nnan"
+ppFMF1 Fninf = "ninf"
+ppFMF1 Fnsz = "nsz"
+ppFMF1 Farcp = "arcp"
+ppFMF1 Fcontract = "contract"
+ppFMF1 Fafn = "afn"
+ppFMF1 Freassoc = "reassoc"
+
+ppFMF :: Fmt [FMF]
+ppFMF = hsep . map ppFMF1
+
 ppExact :: Fmt Bool
 ppExact e = opt e "exact"
 
 ppArithOp :: Fmt ArithOp
 ppArithOp (Add nuw nsw) = "add" <+> ppSignBits nuw nsw
-ppArithOp FAdd          = "fadd"
+ppArithOp (FAdd fmf)    = "fadd" <+> ppFMF fmf
 ppArithOp (Sub nuw nsw) = "sub" <+> ppSignBits nuw nsw
-ppArithOp FSub          = "fsub"
+ppArithOp (FSub fmf)    = "fsub" <+> ppFMF fmf
 ppArithOp (Mul nuw nsw) = "mul" <+> ppSignBits nuw nsw
-ppArithOp FMul          = "fmul"
+ppArithOp (FMul fmf)    = "fmul" <+> ppFMF fmf
 ppArithOp (UDiv e)      = "udiv" <+> ppExact e
 ppArithOp (SDiv e)      = "sdiv" <+> ppExact e
-ppArithOp FDiv          = "fdiv"
+ppArithOp (FDiv fmf)    = "fdiv" <+> ppFMF fmf
 ppArithOp URem          = "urem"
 ppArithOp SRem          = "srem"
-ppArithOp FRem          = "frem"
+ppArithOp (FRem fmf)    = "frem" <+> ppFMF fmf
 
 ppUnaryArithOp :: Fmt UnaryArithOp
-ppUnaryArithOp FNeg = "fneg"
+ppUnaryArithOp (FNeg fmf) = "fneg" <+> ppFMF fmf
 
 ppBitOp :: Fmt BitOp
 ppBitOp (Shl nuw nsw) = "shl"  <+> ppSignBits nuw nsw
@@ -589,7 +602,7 @@ ppInstr instr = case instr of
                          <> comma <+> ppValue r
   Conv op a ty           -> ppConvOp op <+> ppTyped ppValue a
                         <+> "to" <+> ppType ty
-  Call tc ty f args      -> ppCall tc ty f args
+  Call tc fmf ty f args  -> ppCall tc fmf ty f args
   CallBr ty f args u es  -> ppCallBr ty f args u es
   Alloca ty len align    -> ppAlloca ty len align
   Load vol ty ptr mo ma  -> ppLoad vol ty ptr mo ma
@@ -612,11 +625,11 @@ ppInstr instr = case instr of
                          <+> ppAtomicOrdering o
   ICmp op l r            -> "icmp" <+> ppICmpOp op
                         <+> ppTyped ppValue l <> comma <+> ppValue r
-  FCmp op l r            -> "fcmp" <+> ppFCmpOp op
+  FCmp fmf op l r        -> "fcmp" <+> ppFMF fmf <+> ppFCmpOp op
                         <+> ppTyped ppValue l <> comma <+> ppValue r
-  Phi ty vls             -> "phi" <+> ppType ty
+  Phi fmf ty vls         -> "phi" <+> ppFMF fmf <+> ppType ty
                         <+> commas (map ppPhiArg vls)
-  Select c t f           -> "select" <+> ppTyped ppValue c
+  Select fmf c t f       -> "select" <+> ppFMF fmf <+> ppTyped ppValue c
                          <> comma <+> ppTyped ppValue t
                          <> comma <+> ppTyped ppValue (f <$ t)
   ExtractValue v is      -> "extractvalue" <+> ppTyped ppValue v
@@ -746,12 +759,12 @@ ppAlloca ty mbLen mbAlign = "alloca" <+> ppType ty <> len <> align
     a <- mbAlign
     return (comma <+> "align" <+> int a)
 
-ppCall :: Bool -> Type -> Value -> Fmt [Typed Value]
-ppCall tc ty f args
+ppCall :: Bool -> [FMF] -> Type -> Value -> Fmt [Typed Value]
+ppCall tc fmf ty f args
   | tc        = "tail" <+> body
   | otherwise = body
   where
-  body = "call" <+> ppCallSym ty f
+  body = "call" <+> ppFMF fmf <+> ppCallSym ty f
       <> parens (commas (map (ppTyped ppValue) args))
 
 -- | Note that the textual syntax changed in LLVM 10 (@callbr@ was introduced in
