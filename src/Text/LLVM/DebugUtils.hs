@@ -230,16 +230,28 @@ debugInfoToStructField mdMap di =
      let bitfield | testBit (didtFlags dt) 19
                   , Just extraData      <- didtExtraData dt
                   , Just bitfieldOffset <- getInteger mdMap extraData
-                  = Just $ BitfieldInfo { biFieldSize      = didtSize dt
-                                        , biBitfieldOffset = fromInteger bitfieldOffset
-                                        }
+                  = do size <- getSizeOrOffset (didtSize dt)
+                       Just $ BitfieldInfo { biFieldSize      = size
+                                           , biBitfieldOffset = fromInteger bitfieldOffset
+                                           }
                   | otherwise
                   = Nothing
+     offset <- getSizeOrOffset (didtOffset dt)
      Just (StructFieldInfo { sfiName     = fieldName
-                           , sfiOffset   = didtOffset dt
+                           , sfiOffset   = offset
                            , sfiBitfield = bitfield
                            , sfiInfo     = valMdToInfo' mdMap (didtBaseType dt)
                            })
+  where
+    -- TODO: Currently, this only recognizes bare integer (i.e., 'ValInteger')
+    -- sizes and offsets. This is likely good enough for Clang-derived LLVM, but
+    -- Ada-derived LLVM may contain more complex metadata values that this
+    -- currently doesn't handle.
+    getSizeOrOffset :: Maybe ValMd -> Maybe Word64
+    getSizeOrOffset (Just (ValMdValue tv))
+      | ValInteger i <- typedValue tv
+      = Just (fromInteger i)
+    getSizeOrOffset _ = Nothing
 
 
 getUnionFields :: MdMap -> DICompositeType -> Maybe [UnionFieldInfo]
@@ -365,10 +377,10 @@ localVariableNameDeclarations mdMap def =
   where
 
     aux :: [Stmt] -> Map Ident Ident -> Map Ident Ident
-    aux ( Effect (Store False src dst _ _) _
-        : Effect (Call _ _ _ (ValSymbol (Symbol what)) [var,md,_]) _
+    aux ( Effect (Store False src dst _ _) _ _
+        : Effect (Call _ _ _ (ValSymbol (Symbol what)) [var,md,_]) _ _
         : _) sofar
-      | what == "llvm.dbg.declare"
+      | what == "llvm.dbg.declare"  -- pre-LLVM19: intrinsic declaration match
       , Just dstIdent <- extractIdent dst
       , Just srcIdent <- extractIdent src
       , Just varIdent <- extractIdent var
@@ -376,9 +388,9 @@ localVariableNameDeclarations mdMap def =
       , Just name <- extractLvName md
       = Map.insert name srcIdent sofar
 
-    aux ( Effect (Call _ _ _ (ValSymbol (Symbol what)) [var,_,md,_]) _
+    aux ( Effect (Call _ _ _ (ValSymbol (Symbol what)) [var,_,md,_]) _ _
         : _) sofar
-      | what == "llvm.dbg.value"
+      | what == "llvm.dbg.value"  -- pre-LLVM19: intrinsic declaration match
       , Just key  <- extractIdent var
       , Just name <- extractLvName md
       = Map.insert name key sofar

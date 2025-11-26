@@ -40,6 +40,7 @@ module Text.LLVM (
 
     -- * Basic Blocks
   , BB()
+  , runBB
   , freshLabel
   , label
   , comment
@@ -370,13 +371,13 @@ emitStmt stmt = do
   when (isTerminator (stmtInstr stmt)) terminateBasicBlock
 
 effect :: Instr -> BB ()
-effect i = emitStmt (Effect i [])
+effect i = emitStmt (Effect i mempty [])
 
 observe :: Type -> Instr -> BB (Typed Value)
 observe ty i = do
   name <- freshNameBB "r"
   let res = Ident name
-  emitStmt (Result res i [])
+  emitStmt (Result res i mempty [])
   return (Typed ty (ValIdent res))
 
 
@@ -507,8 +508,8 @@ assign r@(Ident name) body = do
   rw <- BB get
   case Seq.viewr (rwStmts rw) of
 
-    stmts Seq.:> Result _ i m ->
-      do BB (set rw { rwStmts = stmts Seq.|> Result r i m })
+    stmts Seq.:> Result _ i d m ->
+      do BB (set rw { rwStmts = stmts Seq.|> Result r i d m })
          return (const (ValIdent r) `fmap` tv)
 
     _ -> error "assign: invalid argument"
@@ -639,10 +640,10 @@ convop :: IsValue a
 convop k a ty = observe ty (k (toValue `fmap` a) ty)
 
 trunc :: IsValue a => Typed a -> Type -> BB (Typed Value)
-trunc  = convop (Conv Trunc)
+trunc  = convop (Conv (Trunc False False))
 
 zext :: IsValue a => Typed a -> Type -> BB (Typed Value)
-zext  = convop (Conv ZExt)
+zext  = convop (Conv (ZExt False))
 
 sext :: IsValue a => Typed a -> Type -> BB (Typed Value)
 sext  = convop (Conv SExt)
@@ -660,7 +661,7 @@ fptosi :: IsValue a => Typed a -> Type -> BB (Typed Value)
 fptosi  = convop (Conv FpToSi)
 
 uitofp :: IsValue a => Typed a -> Type -> BB (Typed Value)
-uitofp  = convop (Conv UiToFp)
+uitofp  = convop (Conv (UiToFp False))
 
 sitofp :: IsValue a => Typed a -> Type -> BB (Typed Value)
 sitofp  = convop (Conv SiToFp)
@@ -675,7 +676,7 @@ bitcast :: IsValue a => Typed a -> Type -> BB (Typed Value)
 bitcast  = convop (Conv BitCast)
 
 icmp :: (IsValue a, IsValue b) => ICmpOp -> Typed a -> b -> BB (Typed Value)
-icmp op l r = observe (iT 1) (ICmp op (toValue `fmap` l) (toValue r))
+icmp op l r = observe (iT 1) (ICmp False op (toValue `fmap` l) (toValue r))
 
 fcmp :: (IsValue a, IsValue b) => FCmpOp -> Typed a -> b -> BB (Typed Value)
 fcmp op l r = observe (iT 1) (FCmp [] op (toValue `fmap` l) (toValue r))
@@ -695,7 +696,7 @@ select c t f = observe (typedType t)
 
 getelementptr :: IsValue a
               => Type -> Typed a -> [Typed Value] -> BB (Typed Value)
-getelementptr ty ptr ixs = observe ty (GEP False ty (toValue `fmap` ptr) ixs)
+getelementptr ty ptr ixs = observe ty (GEP [] ty (toValue `fmap` ptr) ixs)
 
 -- | Emit a call instruction, and generate a new variable for its result.
 call :: IsValue a => Typed a -> [Typed Value] -> BB (Typed Value)

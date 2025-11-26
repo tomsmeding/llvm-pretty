@@ -60,7 +60,8 @@ instance HasLabel Instr' where
                                 <*> traverse (relabel f) a
                                 <*> pure s
                                 <*> pure o
-  relabel f (ICmp op l r)         = ICmp op
+  relabel f (ICmp samesign op l r)
+                                  = ICmp samesign op
                                 <$> traverse (relabel f) l
                                 <*> relabel f r
   relabel f (FCmp op fmf l r)     = FCmp op fmf
@@ -125,9 +126,16 @@ instance HasLabel Stmt'                       where relabel = $(generateRelabel 
 instance HasLabel Clause'                     where relabel = $(generateRelabel 'relabel ''Clause')
 instance HasLabel Value'                      where relabel = $(generateRelabel 'relabel ''Value')
 instance HasLabel ValMd'                      where relabel = $(generateRelabel 'relabel ''ValMd')
+instance HasLabel DebugRecord'                where relabel = $(generateRelabel 'relabel ''DebugRecord')
+instance HasLabel DbgRecAssign'               where relabel = $(generateRelabel 'relabel ''DbgRecAssign')
+instance HasLabel DbgRecDeclare'              where relabel = $(generateRelabel 'relabel ''DbgRecDeclare')
+instance HasLabel DbgRecLabel'                where relabel = $(generateRelabel 'relabel ''DbgRecLabel')
+instance HasLabel DbgRecValueSimple'          where relabel = $(generateRelabel 'relabel ''DbgRecValueSimple')
+instance HasLabel DbgRecValue'                where relabel = $(generateRelabel 'relabel ''DbgRecValue')
 instance HasLabel DILabel'                    where relabel = $(generateRelabel 'relabel ''DILabel')
 instance HasLabel DebugLoc'                   where relabel = $(generateRelabel 'relabel ''DebugLoc')
 instance HasLabel DebugInfo'                  where relabel = $(generateRelabel 'relabel ''DebugInfo')
+instance HasLabel DIBasicType'                where relabel = $(generateRelabel 'relabel ''DIBasicType')
 instance HasLabel DIDerivedType'              where relabel = $(generateRelabel 'relabel ''DIDerivedType')
 instance HasLabel DISubroutineType'           where relabel = $(generateRelabel 'relabel ''DISubroutineType')
 instance HasLabel DISubrange'                 where relabel = $(generateRelabel 'relabel ''DISubrange')

@@ -24,7 +24,7 @@ import Text.LLVM.Triple.Print (printTriple)
 import Control.Applicative ((<|>))
 import Data.Bits ( shiftR, (.&.) )
 import Data.Char (isAlphaNum,isAscii,isDigit,isPrint,ord,toUpper)
-import Data.List (intersperse)
+import Data.List ( intersperse, nub )
 import qualified Data.Map as Map
 import Data.Maybe (catMaybes,fromMaybe,isJust)
 import GHC.Float (castDoubleToWord64, float2Double)
@@ -73,7 +73,7 @@ llvmV3_8 = 3
 -- this is used for defaulting and otherwise reporting the maximum LLVM version
 -- known to be supported.
 llvmVlatest :: LLVMVer
-llvmVlatest = 17
+llvmVlatest = 19
 
 
 -- | The differences between various versions of the llvm textual AST.
@@ -206,32 +206,59 @@ ppLayoutSpec ls =
   case ls of
     BigEndian                 -> char 'E'
     LittleEndian              -> char 'e'
-    PointerSize 0 sz abi pref -> char 'p' <> char ':' <> ppLayoutBody sz abi pref
-    PointerSize n sz abi pref -> char 'p' <> int n <> char ':'
-                                          <> ppLayoutBody sz abi pref
-    IntegerSize   sz abi pref -> char 'i' <> ppLayoutBody sz abi pref
-    VectorSize    sz abi pref -> char 'v' <> ppLayoutBody sz abi pref
-    FloatSize     sz abi pref -> char 'f' <> ppLayoutBody sz abi pref
-    StackObjSize  sz abi pref -> char 's' <> ppLayoutBody sz abi pref
-    AggregateSize sz abi pref -> char 'a' <> ppLayoutBody sz abi pref
+    PointerSize ps            -> char 'p' <> ppPointerSize ps
+    IntegerSize sz            -> char 'i' <> ppStorage sz
+    VectorSize  sz            -> char 'v' <> ppStorage sz
+    FloatSize   sz            -> char 'f' <> ppStorage sz
+    StackObjSize sz           -> char 's' <> ppStorage sz
+    AggregateSize Nothing a   -> char 'a' <> char ':' <> ppAlignment a
+    AggregateSize (Just s) a  -> char 'a' <> int s <> char ':' <> ppAlignment a
     NativeIntSize szs         ->
       char 'n' <> hcat (punctuate (char ':') (map int szs))
     StackAlign a              -> char 'S' <> int a
+    ProgramAddrSpace as       -> char 'P' <> int as
+    GlobalAddrSpace as        -> char 'G' <> int as
+    AllocaAddrSpace as        -> char 'A' <> int as
+    FunctionPointerAlign ty abi ->
+      char 'F' <> ppFunctionPointerAlignType ty <> int abi
     Mangling m                -> char 'm' <> char ':' <> ppMangling m
+    NonIntegralPointerSpaces asl ->
+      "ni:" <> hcat (punctuate (char ':') (map int asl))
 
--- | Pretty-print the common case for data layout specifications.
-ppLayoutBody :: Int -> Int -> Fmt (Maybe Int)
-ppLayoutBody size abi mb = int size <> char ':' <> int abi <> pref
-  where
-  pref = case mb of
-    Nothing -> empty
-    Just p  -> char ':' <> int p
+ppPointerSize :: Fmt PointerSize
+ppPointerSize ps =
+  if ptrAddrSpace ps == 0
+  then char ':' <> ppStorage (ptrStorage ps)
+       <> ppOptColonInt (ptrAddrIndexSize ps)
+  else int (ptrAddrSpace ps) <> char ':' <> ppStorage (ptrStorage ps)
+       <> ppOptColonInt (ptrAddrIndexSize ps)
+
+ppStorage :: Fmt Storage
+ppStorage s = int (storageSize s) <> char ':'
+              <> ppAlignment (storageAlignment s)
+
+ppAlignment :: Fmt Alignment
+ppAlignment a = int (alignABI a) <> ppOptColonInt (alignPreferred a)
+
+ppOptColonInt :: Fmt (Maybe Int)
+ppOptColonInt = \case
+  Nothing -> empty
+  Just i  -> char ':' <> int i
+
+ppFunctionPointerAlignType :: Fmt FunctionPointerAlignType
+ppFunctionPointerAlignType ty =
+  case ty of
+    IndependentOfFunctionAlign -> char 'i'
+    MultipleOfFunctionAlign -> char 'n'
 
 ppMangling :: Fmt Mangling
 ppMangling ElfMangling         = char 'e'
+ppMangling GoffMangling        = char 'l'
 ppMangling MipsMangling        = char 'm'
 ppMangling MachOMangling       = char 'o'
 ppMangling WindowsCoffMangling = char 'w'
+ppMangling WindowsX86CoffMangling = char 'x'
+ppMangling XCoffMangling       = char 'a'
 
 
 -- Inline Assembly -------------------------------------------------------------
@@ -319,7 +346,14 @@ ppGlobal g = ppSymbol (globalSym g) <+> char '='
          <+> ppGlobalAttrs (isJust $ globalValue g) (globalAttrs g)
          <+> ppType (globalType g) <+> ppMaybe ppValue (globalValue g)
           <> ppAlign (globalAlign g)
-          <> ppAttachedMetadata (Map.toList (globalMetadata g))
+          <> ppGlobalMetadata (Map.toList (globalMetadata g))
+
+ppGlobalMetadata :: Fmt [(String, ValMd' BlockLabel)]
+ppGlobalMetadata mds
+  | null mds  = empty
+  | otherwise = comma <+> commas (map step mds)
+  where
+  step (l,md) = ppMetadata (text l) <+> ppValMd md
 
 -- | Pretty-print Global Attributes (usually associated with a global variable
 -- declaration). The first argument to ppGlobalAttrs indicates whether there is a
@@ -454,9 +488,11 @@ ppBasicBlock bb = ppMaybe ppLabelDef (bbLabel bb)
 
 ppStmt :: Fmt Stmt
 ppStmt stmt = case stmt of
-  Result var i mds -> ppIdent var <+> char '=' <+> ppInstr i
-                   <> ppAttachedMetadata mds
-  Effect i mds     -> ppInstr i <> ppAttachedMetadata mds
+  Result var i drs mds -> ppDebugRecords drs (ppIdent var <+> char '='
+                                              <+> ppInstr i
+                                               <> ppAttachedMetadata mds)
+  Effect i drs mds     -> ppDebugRecords drs (ppInstr i
+                                              <> ppAttachedMetadata mds)
 
 ppAttachedMetadata :: Fmt [(String,ValMd)]
 ppAttachedMetadata mds
@@ -547,14 +583,14 @@ ppBitOp Or            = "or"
 ppBitOp Xor           = "xor"
 
 ppConvOp :: Fmt ConvOp
-ppConvOp Trunc    = "trunc"
-ppConvOp ZExt     = "zext"
+ppConvOp (Trunc nuw nsw) = "trunc" <+> ppSignBits nuw nsw
+ppConvOp (ZExt nneg)  = "zext" <+> opt nneg "nneg"
 ppConvOp SExt     = "sext"
 ppConvOp FpTrunc  = "fptrunc"
 ppConvOp FpExt    = "fpext"
 ppConvOp FpToUi   = "fptoui"
 ppConvOp FpToSi   = "fptosi"
-ppConvOp UiToFp   = "uitofp"
+ppConvOp (UiToFp nneg) = "uitofp" <+> opt nneg "nneg"
 ppConvOp SiToFp   = "sitofp"
 ppConvOp PtrToInt = "ptrtoint"
 ppConvOp IntToPtr = "inttoptr"
@@ -623,7 +659,7 @@ ppInstr instr = case instr of
                          <> comma <+> ppTyped ppValue a
                          <+> ppScope s
                          <+> ppAtomicOrdering o
-  ICmp op l r            -> "icmp" <+> ppICmpOp op
+  ICmp samesign op l r   -> "icmp" <+> opt samesign "samesign" <+> ppICmpOp op
                         <+> ppTyped ppValue l <> comma <+> ppValue r
   FCmp fmf op l r        -> "fcmp" <+> ppFMF fmf <+> ppFCmpOp op
                         <+> ppTyped ppValue l <> comma <+> ppValue r
@@ -640,7 +676,7 @@ ppInstr instr = case instr of
   ShuffleVector a b m    -> "shufflevector" <+> ppTyped ppValue a
                          <> comma <+> ppTyped ppValue (b <$ a)
                          <> comma <+> ppTyped ppValue m
-  GEP ib ty ptr ixs      -> ppGEP ib ty ptr ixs
+  GEP gf ty ptr ixs      -> ppGEP gf ty ptr ixs
   Comment str            -> char ';' <+> text str
   Jump i                 -> "br"
                         <+> ppTypedLabel i
@@ -663,7 +699,10 @@ ppInstr instr = case instr of
                          <> comma <+> ppVectorIndex i
   IndirectBr d ls        -> "indirectbr"
                         <+> ppTyped ppValue d
-                         <> comma <+> commas (map ppTypedLabel ls)
+                         <> comma
+                        <+> char '['
+                        <+> commas (map ppTypedLabel ls)
+                        <+> char ']'
   Switch c d ls          -> "switch"
                         <+> ppTyped ppValue c
                          <> comma <+> ppTypedLabel d
@@ -802,18 +841,19 @@ ppCallSym ty val = pp_ty <+> ppValue val
           -> ppType res
         _ -> ppType ty
 
-ppGEP :: Bool -> Type -> Typed Value -> Fmt [Typed Value]
-ppGEP ib ty ptr ixs =
-  "getelementptr" <+> inbounds
+ppGEP :: [GEPAttr] -> Type -> Typed Value -> Fmt [Typed Value]
+ppGEP gf ty ptr ixs =
+  "getelementptr"
+    <+> (if inlineIsBool
+         then (if GEP_Inbounds `elem` gf then "inbounds" else empty)
+         else ppGepFlags gf)
     <+> (if isExplicit then explicit else empty)
     <+> commas (map (ppTyped ppValue) (ptr:ixs))
   where
   isExplicit = llvmVer >= llvmV3_7
+  inlineIsBool = llvmVer < 19
 
   explicit = ppType ty <> comma
-
-  inbounds | ib        = "inbounds"
-           | otherwise = empty
 
 ppInvoke :: Type -> Value -> [Typed Value] -> BlockLabel -> Fmt BlockLabel
 ppInvoke ty f args to uw = body
@@ -918,13 +958,20 @@ ppDebugLoc' pp dl = (if llvmVer >= llvmV3_7 then "!DILocation"
              <> parens (commas [ "line:"   <+> integral (dlLine dl)
                                , "column:" <+> integral (dlCol dl)
                                , "scope:"  <+> ppValMd' pp (dlScope dl)
-                               ] <> mbIA <> mbImplicit)
+                               ] <> mbIA <> mbImplicit <>
+                        when' (llvmVer >= 21) (mbAtomGroup <> mbAtomRank))
 
   where
   mbIA = case dlIA dl of
            Just md -> comma <+> "inlinedAt:" <+> ppValMd' pp md
            Nothing -> empty
   mbImplicit = if dlImplicit dl then comma <+> "implicit" else empty
+  mbAtomGroup = if dlAtomGroup dl > 0
+                  then comma <+> "atomGroup:" <+> integral (dlAtomGroup dl)
+                  else empty
+  mbAtomRank = if dlAtomRank dl > 0
+                 then comma <+> "atomRank:" <+> integral (dlAtomRank dl)
+                 else empty
 
 ppDebugLoc :: Fmt DebugLoc
 ppDebugLoc = ppDebugLoc' ppLabel
@@ -967,23 +1014,75 @@ ppAsm s a i c =
 ppConstExpr' :: Fmt i -> Fmt (ConstExpr' i)
 ppConstExpr' pp expr =
   case expr of
-    ConstGEP inb _mix ty ptr ixs  ->
+    ConstGEP optflgs mrng ty ptr ixs  ->
       "getelementptr"
-        <+> opt inb "inbounds"
-        <+> parens (commas (ppType ty : map ppTyp' (ptr:ixs)))
-    ConstConv op tv t  -> ppConvOp op <+> parens (ppTyp' tv <+> "to" <+> ppType t)
+        <+> ppGepFlags optflgs
+        <+> ppRange mrng
+        <+> parens (commas (
+                       let argIndices = 0 : [0..] -- rval, ptr, then ixs indices
+                       in reverse  -- ppTyp's pushes entries to the listg head
+                          $ foldl (ppTyp's mrng) [ppType ty]
+                          $ zip argIndices (ptr:ixs)))
+    ConstConv op tv t  ->
+      let droppedIn18 = case op of
+                          -- https://github.com/llvm/llvm-project commit e4a4122 dropped ZExt and SExt
+                          ZExt _ -> True
+                          SExt -> True
+                          -- https://github.com/llvm/llvm-project commit 17764d2 dropped FpTrunc through SiToFP
+                          FpTrunc -> True
+                          FpExt -> True
+                          FpToUi -> True
+                          FpToSi -> True
+                          UiToFp _ -> True
+                          SiToFp -> True
+                          _ -> False
+          ppConstConv = ppConvOp op <+> parens (ppTyp' tv <+> "to" <+> ppType t)
+      in if droppedIn18
+         then droppedInLLVM 18 "fptrunc/fpext/fptoui/fptosi/uitofp/sitofp constexprs" ppConstConv
+         else ppConstConv
     ConstSelect c l r  ->
-      "select" <+> parens (commas [ ppTyp' c, ppTyp' l , ppTyp' r])
+      droppedInLLVM 17 "select constexpr" -- https://github.com/llvm/llvm-project commit bbfb13a
+
+      $ "select" <+> parens (commas [ ppTyp' c, ppTyp' l , ppTyp' r])
     ConstBlockAddr t l -> "blockaddress" <+> parens (ppVal' (typedValue t) <> comma <+> pp l)
-    ConstFCmp       op a b -> "fcmp" <+> ppFCmpOp op <+> ppTupleT a b
-    ConstICmp       op a b -> "icmp" <+> ppICmpOp op <+> ppTupleT a b
+    ConstFCmp       op a b -> droppedInLLVM 19 "fcmp constexprs"
+                              $ "fcmp" <+> ppFCmpOp op <+> ppTupleT a b
+    ConstICmp       op a b -> droppedInLLVM 19 "icmp constexprs"
+                              $ "icmp" <+> ppICmpOp op <+> ppTupleT a b
     ConstArith      op a b -> ppArithOp op <+> ppTuple a b
     ConstUnaryArith op a   -> ppUnaryArithOp op <+> ppTyp' a
-    ConstBit        op a b -> ppBitOp op   <+> ppTuple a b
+    ConstBit        op@(Shl _ _) a b -> droppedInLLVM 19 "shl constexprs"
+                                        $ ppBitOp op   <+> ppTuple a b
+    ConstBit        Xor a b -> ppBitOp Xor <+> ppTuple a b
+    ConstBit        op a b -> droppedInLLVM 18 "and/or/lshr/ashr constexprs"
+                              $ ppBitOp op <+> ppTuple a b
   where ppTuple  a b = parens $ ppTyped ppVal' a <> comma <+> ppVal' b
         ppTupleT a b = parens $ ppTyped ppVal' a <> comma <+> ppTyp' b
         ppVal'       = ppValue' pp
         ppTyp'       = ppTyped ppVal'
+        ppTyp's mrng a (i,t) =
+          let inrangeMark = if Just (RangeIndex i) == mrng then "inrange" else empty
+          in (inrangeMark <+> ppTyp' t) : a
+        ppRange =
+          let ppR = \case
+                RangeIndex _i -> empty -- handled in ppTyp's
+                Range _ l u ->
+                  "inrange(" <> integral l <> ", " <> integral u <> ")"
+          in maybe empty ppR
+
+ppGepFlags :: Fmt [GEPAttr]
+ppGepFlags s =
+  let fltr = if GEP_Inbounds `elem` s
+             then
+               -- inbounds implies nusw, but LLVM stipulates that if
+               -- inbounds is present, nusw is not also printed.
+               filter (/= GEP_NUSW)
+             else id
+      ppF = \case
+        GEP_Inbounds -> "inbounds"
+        GEP_NUSW -> "nusw"
+        GEP_NUW -> "nuw"
+  in foldl (\o f -> o <+> ppF f) empty $ fltr $ nub s
 
 ppConstExpr :: Fmt ConstExpr
 ppConstExpr = ppConstExpr' ppLabel
@@ -992,7 +1091,7 @@ ppConstExpr = ppConstExpr' ppLabel
 
 ppDebugInfo' :: Fmt i -> Fmt (DebugInfo' i)
 ppDebugInfo' pp di = case di of
-  DebugInfoBasicType bt         -> ppDIBasicType bt
+  DebugInfoBasicType bt         -> ppDIBasicType' pp bt
   DebugInfoCompileUnit cu       -> ppDICompileUnit' pp cu
   DebugInfoCompositeType ct     -> ppDICompositeType' pp ct
   DebugInfoDerivedType dt       -> ppDIDerivedType' pp dt
@@ -1014,6 +1113,68 @@ ppDebugInfo' pp di = case di of
   DebugInfoLabel dil            -> ppDILabel' pp dil
   DebugInfoArgList args         -> ppDIArgList' pp args
   DebugInfoAssignID             -> "!DIAssignID()"
+  -- DebugRecordDeclare drd        -> ppDbgRecDeclare' pp drd
+
+-- Prints DebugRecords (introduced in LLVM 19) which replace debug intrinsics and
+-- unlike the intrinsics that follow the instruction, the debug records *precede*
+-- the Instruction they affect.
+ppDebugRecords :: [DebugRecord' BlockLabel] -> Fmt Doc
+ppDebugRecords [] = id
+ppDebugRecords drs = ((nest 2 $ vcat (ppDebugRecord' ppLabel <$> drs)) $$)
+
+ppDebugRecord' :: Fmt lab -> Fmt (DebugRecord' lab)
+ppDebugRecord' pl = \case
+  DebugRecordValue drv -> ppDbgRecValue' pl drv
+  DebugRecordDeclare drd -> ppDbgRecDeclare' pl drd
+  DebugRecordAssign dra -> ppDbgRecAssign' pl dra
+  DebugRecordValueSimple dvs -> ppDbgRecValueSimple' pl dvs
+  DebugRecordLabel drl -> ppDbgRecLabel' pl drl
+
+ppDbgRecValue' :: Fmt lab -> Fmt (DbgRecValue' lab)
+ppDbgRecValue' pl dr =
+  "#dbg_value"
+  <> parens (commas [ ppValMd' pl $ drvValAsMetadata dr
+                    , ppValMd' pl $ drvLocalVariable dr
+                    , ppValMd' pl $ drvExpression dr
+                    , ppValMd' pl $ drvLocation dr
+                    ])
+
+ppDbgRecDeclare' :: Fmt lab -> Fmt (DbgRecDeclare' lab)
+ppDbgRecDeclare' pl dr =
+  "#dbg_declare"
+  <> parens (commas [ ppValMd' pl $ drdValAsMetadata dr
+                    , ppValMd' pl $ drdLocalVariable dr
+                    , ppValMd' pl $ drdExpression dr
+                    , ppValMd' pl $ drdLocation dr
+                    ])
+
+ppDbgRecAssign' :: Fmt lab -> Fmt (DbgRecAssign' lab)
+ppDbgRecAssign' pl dr =
+  "#dbg_assign"
+  <> parens (commas [ ppValMd' pl $ draValAsMetadata dr
+                    , ppValMd' pl $ draLocalVariable dr
+                    , ppValMd' pl $ draExpression dr
+                    , ppValMd' pl $ draAssignID dr
+                    , ppValMd' pl $ draValAsMetadataAddr dr
+                    , ppValMd' pl $ draExpressionAddr dr
+                    , ppValMd' pl $ draLocation dr
+                    ])
+
+ppDbgRecValueSimple' :: Fmt lab -> Fmt (DbgRecValueSimple' lab)
+ppDbgRecValueSimple' pl dr =
+  "#dbg_value"
+  <> parens (commas [ ppTyped (ppValue' pl) $ drvsValue dr
+                    , ppValMd' pl $ drvsLocalVariable dr
+                    , ppValMd' pl $ drvsExpression dr
+                    , ppValMd' pl $ drvsLocation dr
+                    ])
+
+ppDbgRecLabel' :: Fmt lab -> Fmt (DbgRecLabel' lab)
+ppDbgRecLabel' pl dr =
+  "#dbg_label"
+  <> parens (commas [ ppValMd' pl $ drlLabel dr
+                    , ppValMd' pl $ drlLocation dr
+                    ])
 
 ppDebugInfo :: Fmt DebugInfo
 ppDebugInfo = ppDebugInfo' ppLabel
@@ -1033,11 +1194,17 @@ ppDIImportedEntity = ppDIImportedEntity' ppLabel
 
 ppDILabel' :: Fmt i -> Fmt (DILabel' i)
 ppDILabel' pp ie = "!DILabel"
-  <> parens (mcommas [ (("scope:"  <+>) . ppValMd' pp) <$> dilScope ie
-                     , pure ("name:" <+> ppStringLiteral (dilName ie))
-                     , (("file:"   <+>) . ppValMd' pp) <$> dilFile ie
-                     , pure ("line:"   <+> integral (dilLine ie))
-                     ])
+  <> parens (mcommas $
+       [ (("scope:"  <+>) . ppValMd' pp) <$> dilScope ie
+       , pure ("name:" <+> ppStringLiteral (dilName ie))
+       , (("file:"   <+>) . ppValMd' pp) <$> dilFile ie
+       , pure ("line:"   <+> integral (dilLine ie))
+       ] ++
+       when' (llvmVer >= 21)
+       [ pure ("column:" <+> integral (dilColumn ie))
+       , pure ("isArtificial:" <+> ppBool (dilIsArtificial ie))
+       , (("coroSuspendIdx:" <+>) . integral) <$> dilCoroSuspendIdx ie
+       ])
 
 ppDILabel :: Fmt DILabel
 ppDILabel = ppDILabel' ppLabel
@@ -1073,18 +1240,20 @@ ppDITemplateValueParameter' pp vp = "!DITemplateValueParameter"
 ppDITemplateValueParameter :: Fmt DITemplateValueParameter
 ppDITemplateValueParameter = ppDITemplateValueParameter' ppLabel
 
-ppDIBasicType :: Fmt DIBasicType
-ppDIBasicType bt = "!DIBasicType"
-  <> parens (commas [ "tag:"      <+> integral (dibtTag bt)
-                    , "name:"     <+> doubleQuotes (text (dibtName bt))
-                    , "size:"     <+> integral (dibtSize bt)
-                    , "align:"    <+> integral (dibtAlign bt)
-                    , "encoding:" <+> integral (dibtEncoding bt)
-                    ] <> mbFlags)
-  where
-  mbFlags = case dibtFlags bt of
-              Just flags -> comma <+> "flags:" <+> integral flags
-              Nothing -> empty
+ppDIBasicType' :: Fmt i -> Fmt (DIBasicType' i)
+ppDIBasicType' pp bt = "!DIBasicType"
+  <> parens (mcommas
+       [ pure ("tag:"      <+> integral (dibtTag bt))
+       , pure ("name:"     <+> doubleQuotes (text (dibtName bt)))
+       ,     (("size:"     <+>) . ppSizeOrOffsetValMd' pp) <$> dibtSize bt
+       , pure ("align:"    <+> integral (dibtAlign bt))
+       , pure ("encoding:" <+> integral (dibtEncoding bt))
+       ,     (("flags:"    <+>) . integral)
+             <$> dibtFlags bt
+       , if dibtNumExtraInhabitants bt > 0
+         then pure ("numExtraInhabitants:" <+> integral (dibtNumExtraInhabitants bt))
+         else Nothing
+       ])
 
 ppDICompileUnit' :: Fmt i -> Fmt (DICompileUnit' i)
 ppDICompileUnit' pp cu = "!DICompileUnit"
@@ -1135,9 +1304,9 @@ ppDICompositeType' pp ct = "!DICompositeType"
        ,     (("file:"           <+>) . ppValMd' pp) <$> (dictFile ct)
        , pure ("line:"           <+> integral (dictLine ct))
        ,     (("baseType:"       <+>) . ppValMd' pp) <$> (dictBaseType ct)
-       , pure ("size:"           <+> integral (dictSize ct))
+       ,     (("size:"           <+>) . ppSizeOrOffsetValMd' pp) <$> dictSize ct
        , pure ("align:"          <+> integral (dictAlign ct))
-       , pure ("offset:"         <+> integral (dictOffset ct))
+       ,     (("offset:"         <+>) . ppSizeOrOffsetValMd' pp) <$> dictOffset ct
        , pure ("flags:"          <+> integral (dictFlags ct))
        ,     (("elements:"       <+>) . ppValMd' pp) <$> (dictElements ct)
        , pure ("runtimeLang:"    <+> integral (dictRuntimeLang ct))
@@ -1150,6 +1319,12 @@ ppDICompositeType' pp ct = "!DICompositeType"
        ,     (("allocated:"      <+>) . ppValMd' pp) <$> (dictAllocated ct)
        ,     (("rank:"           <+>) . ppValMd' pp) <$> (dictRank ct)
        ,     (("annotations:"    <+>) . ppValMd' pp) <$> (dictAnnotations ct)
+       , if dictNumExtraInhabitants ct > 0
+         then pure ("numExtraInhabitants:" <+> integral (dictNumExtraInhabitants ct))
+         else Nothing
+       ,     (("specification:"  <+>) . ppValMd' pp) <$> (dictSpecification ct)
+       ,     (("enumKind:"       <+>) . integral) <$> (dictEnumKind ct)
+       ,     (("bitStride:"      <+>) . ppValMd' pp) <$> (dictBitStride ct)
        ])
 
 ppDICompositeType :: Fmt DICompositeType
@@ -1164,9 +1339,9 @@ ppDIDerivedType' pp dt = "!DIDerivedType"
        , pure ("line:"      <+> integral (didtLine dt))
        ,     (("scope:"     <+>) . ppValMd' pp) <$> (didtScope dt)
        ,      ("baseType:"  <+>) <$> (ppValMd' pp <$> didtBaseType dt <|> Just "null")
-       , pure ("size:"      <+> integral (didtSize dt))
+       ,     (("size:"      <+>) . ppSizeOrOffsetValMd' pp) <$> didtSize dt
        , pure ("align:"     <+> integral (didtAlign dt))
-       , pure ("offset:"    <+> integral (didtOffset dt))
+       ,     (("offset:"    <+>) . ppSizeOrOffsetValMd' pp) <$> didtOffset dt
        , pure ("flags:"     <+> integral (didtFlags dt))
        ,     (("extraData:" <+>) . ppValMd' pp) <$> (didtExtraData dt)
        ,     (("dwarfAddressSpace:" <+>) . integral) <$> didtDwarfAddressSpace dt
@@ -1384,6 +1559,17 @@ ppInt64ValMd' canFallBack pp = go
           -- ValMdRef _idx -> mempty -- no table here to look this up...
           o -> when' canFallBack $ ppValMd' pp o
 
+-- | Print the size or offset of a type-related metadata node. This value can
+-- either be an integer literal (in which case the bare literal is printed), or
+-- in LLVM 21 or later, it can be a more complicated metadata expression (in
+-- which case the metadata is pretty-printed).
+ppSizeOrOffsetValMd' :: Fmt i -> Fmt (ValMd' i)
+ppSizeOrOffsetValMd' pp = \case
+  ValMdValue tv
+    | ValInteger i <- typedValue tv
+      -> integer i
+  o -> when' (llvmVer >= 21) $ ppValMd' pp o
+
 
 commas :: Fmt [Doc]
 commas  = fsep . punctuate comma
@@ -1409,3 +1595,11 @@ onlyOnLLVM fromVer name
   | llvmVer >= fromVer = id
   | otherwise          = error $ name ++ " is supported only on LLVM >= "
                                  ++ llvmVerToString fromVer
+
+-- | Throw an error if the @?config@ version is older than the given version. The
+-- String indicates which constructor is unavailable in the error message.
+droppedInLLVM :: (?config :: Config) => LLVMVer -> String -> a -> a
+droppedInLLVM fromVer name
+  | llvmVer >= fromVer = error $ name ++ " is supported only up to LLVM >= "
+                                 ++ llvmVerToString fromVer
+  | otherwise          = id

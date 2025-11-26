@@ -9,12 +9,15 @@ At the same time, while the AST coverage is fairly extensive, it is also
 incomplete: there are some values that new LLVM versions would accept but are
 not yet represented here.
 -}
+
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE ViewPatterns #-}
 {-# LANGUAGE DeriveDataTypeable, DeriveFunctor, DeriveGeneric #-}
 {-# LANGUAGE PatternGuards #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE DeriveLift #-}
+
 module Text.LLVM.AST
   ( -- * Modules
     Module(..)
@@ -28,6 +31,12 @@ module Text.LLVM.AST
     -- * Data Layout
   , DataLayout
   , LayoutSpec(..)
+  , Alignment(..)
+  , FunctionPointerAlignType(..)
+  , Storage(..)
+  , PointerSize(..)
+  , AddressSpace
+  , NumBits
   , Mangling(..)
   , parseDataLayout
     -- * Inline Assembly
@@ -134,8 +143,12 @@ module Text.LLVM.AST
   , stmtInstr
   , stmtMetadata
   , extendMetadata
+  , addDebugRecord
     -- * Constant Expressions
   , ConstExpr'(..), ConstExpr
+  , GEPAttr(..)
+  , orderedGEPAttrs
+  , RangeSpec(RangeIndex, Range)
     -- * DWARF Debug Info
   , DebugInfo'(..), DebugInfo
   , DILabel, DILabel'(..)
@@ -149,7 +162,7 @@ module Text.LLVM.AST
   , DwarfVirtuality
   , DIFlags
   , DIEmissionKind
-  , DIBasicType(..)
+  , DIBasicType'(..), DIBasicType
   , DICompileUnit'(..), DICompileUnit
   , DICompositeType'(..), DICompositeType
   , DIDerivedType'(..), DIDerivedType
@@ -164,6 +177,13 @@ module Text.LLVM.AST
   , DISubrange'(..), DISubrange
   , DISubroutineType'(..), DISubroutineType
   , DIArgList'(..), DIArgList
+  , dwarf_DW_APPLE_ENUM_KIND_invalid
+  , DebugRecord, DebugRecord'(..)
+  , DbgRecAssign, DbgRecAssign'(..)
+  , DbgRecDeclare, DbgRecDeclare'(..)
+  , DbgRecLabel, DbgRecLabel'(..)
+  , DbgRecValueSimple, DbgRecValueSimple'(..)
+  , DbgRecValue, DbgRecValue'(..)
     -- * Aggregate Utilities
   , IndexResult(..)
   , isInvalid
@@ -175,18 +195,19 @@ module Text.LLVM.AST
   , resolveValueIndex
   ) where
 
-import Data.Functor.Identity (Identity(..))
+import Control.Monad (MonadPlus(mzero,mplus),(<=<),guard)
+import Data.Bits ( complement )
 import Data.Coerce (coerce)
 import Data.Data (Data)
-import Data.Typeable (Typeable)
-import Control.Monad (MonadPlus(mzero,mplus),(<=<),guard)
-import Data.Int (Int32,Int64)
+import Data.Functor.Identity (Identity(..))
 import Data.Generics (everywhere, extQ, mkT, something)
+import Data.Int (Int32,Int64)
 import Data.List (genericIndex,genericLength)
 import qualified Data.Map as Map
 import Data.Maybe (isJust)
 import Data.Semigroup as Sem
 import Data.String (IsString(fromString))
+import Data.Typeable (Typeable)
 import Data.Word (Word8,Word16,Word32,Word64)
 import GHC.Generics (Generic, Generic1)
 import Language.Haskell.TH.Syntax (Lift)
@@ -281,34 +302,75 @@ data GlobalAlias = GlobalAlias
 
 
 -- Data Layout -----------------------------------------------------------------
+-- https://releases.llvm.org/19.1.0/docs/LangRef.html#data-layout
 
 type DataLayout = [LayoutSpec]
 
 data LayoutSpec
   = BigEndian
   | LittleEndian
-  | PointerSize   !Int !Int !Int (Maybe Int) -- ^ address space, size, abi, pref
-  | IntegerSize   !Int !Int (Maybe Int) -- ^ size, abi, pref
-  | VectorSize    !Int !Int (Maybe Int) -- ^ size, abi, pref
-  | FloatSize     !Int !Int (Maybe Int) -- ^ size, abi, pref
-  | StackObjSize  !Int !Int (Maybe Int) -- ^ size, abi, pref
-  | AggregateSize !Int !Int (Maybe Int) -- ^ size, abi, pref
-  | NativeIntSize [Int]
-  | StackAlign    !Int -- ^ size
+  | PointerSize PointerSize
+  | IntegerSize Storage
+  | VectorSize Storage
+  | FloatSize Storage
+  | StackObjSize  Storage
+  | AggregateSize (Maybe Int) !Alignment -- n.b. first Int present pre-LLVM4
+  | NativeIntSize [NumBits]
+  | StackAlign    !NumBits -- ^ size
+  | ProgramAddrSpace !AddressSpace
+  | GlobalAddrSpace !AddressSpace
+  | AllocaAddrSpace !AddressSpace
+  | FunctionPointerAlign !FunctionPointerAlignType !NumBits -- ^ type, abi
   | Mangling Mangling
+  | NonIntegralPointerSpaces [AddressSpace]
     deriving (Data, Eq, Generic, Ord, Show, Typeable)
 
+data Alignment = Alignment
+  { alignABI :: !NumBits
+  , alignPreferred :: Maybe NumBits  -- ^ default = alignABI
+  }
+  deriving (Data, Eq, Generic, Ord, Show, Typeable)
+
+-- | How should a function pointer be aligned?
+data FunctionPointerAlignType
+  = IndependentOfFunctionAlign
+    -- ^ The alignment of function pointers is independent of the alignment of
+    -- functions.
+  | MultipleOfFunctionAlign
+    -- ^ The alignment of function pointers is a multiple of the explicit
+    -- alignment specified on the function.
+  deriving (Data, Eq, Enum, Generic, Ord, Show, Typeable)
+
+data Storage = Storage
+  { storageSize :: !NumBits  -- ^ valid range [1,2^24)
+  , storageAlignment :: Alignment
+  }
+  deriving (Data, Eq, Generic, Ord, Show, Typeable)
+
+data PointerSize = PtrSize
+  { ptrAddrSpace :: !AddressSpace
+  , ptrStorage :: Storage
+  , ptrAddrIndexSize :: Maybe NumBits  -- ^ m.b. <= ptrSize, default = ptrSize
+  }
+  deriving (Data, Eq, Generic, Ord, Show, Typeable)
+
+type AddressSpace = Int
+type NumBits = Int
+
 data Mangling = ElfMangling
+              | GoffMangling
               | MipsMangling
               | MachOMangling
               | WindowsCoffMangling
+              | WindowsX86CoffMangling
+              | XCoffMangling
                 deriving (Data, Eq, Enum, Generic, Ord, Show, Typeable)
 
 -- | Parse the data layout string.
 parseDataLayout :: MonadPlus m => String -> m DataLayout
 parseDataLayout str =
   case parse (pDataLayout <* eof) "<internal>" str of
-    Left _err -> mzero
+    Left _err -> {- debugging: trace (show err) -} mzero
     Right specs -> return specs
   where
     pDataLayout :: Parser DataLayout
@@ -320,11 +382,17 @@ parseDataLayout str =
          case c of
            'E' -> return BigEndian
            'e' -> return LittleEndian
-           'S' -> StackAlign    <$> pInt
-           'p' -> PointerSize   <$> pInt0 <*> pCInt <*> pCInt <*> pPref
-           'i' -> IntegerSize   <$> pInt <*> pCInt <*> pPref
-           'v' -> VectorSize    <$> pInt <*> pCInt <*> pPref
-           'f' -> FloatSize     <$> pInt <*> pCInt <*> pPref  -- size of float, abi-align, pref-align
+           'S' -> StackAlign <$> pInt
+           'P' -> ProgramAddrSpace <$> pInt -- Added in LLVM7
+           'G' -> GlobalAddrSpace <$> pInt -- Added in LLVM11
+           'A' -> AllocaAddrSpace <$> pInt -- Added in LLVM11
+           'p' -> do as <- pInt <|> return 0
+                     st <- char ':' >> pStorage
+                     idx <- pCOInt -- Added in LLVM7
+                     return $ PointerSize $ PtrSize as st idx
+           'i' -> IntegerSize <$> pStorage
+           'v' -> VectorSize <$> pStorage
+           'f' -> FloatSize <$> pStorage
                   -- Note that the data layout specified in the LLVM
                   -- BC/IR file is not a directive to the backend, but
                   -- is instead an indication of what the particular
@@ -339,10 +407,27 @@ parseDataLayout str =
                   -- (for example) references to LongDoubleWidth and
                   -- LongDoubleFormat in
                   -- https://github.com/llvm/llvm-project/blob/release_60/clang/lib/Basic/Targets/X86.h
-           's' -> StackObjSize  <$> pInt <*> pCInt <*> pPref
-           'a' -> AggregateSize <$> pInt <*> pCInt <*> pPref
-           'n' -> NativeIntSize <$> sepBy pInt (char ':')
-           'm' -> Mangling      <$> (char ':' >> pMangling)
+           's' -> StackObjSize <$> pStorage -- Obsoleted in LLVM4
+           'a' -> alphaNum >>= \case
+             ':' -> AggregateSize Nothing <$> pAlignment
+             d   -> AggregateSize <$> (Just <$> pIntWithFirstDigit d)
+                    <* char ':' <*> pAlignment
+           'F' -> FunctionPointerAlign <$> pFunctionPointerAlignType <*> pInt -- Added in LLVM9
+           'm' -> Mangling <$ char ':' <*> pMangling
+           'n' -> alphaNum >>= \case
+             'i' -> char ':'
+                    >> (NonIntegralPointerSpaces <$> sepBy pInt (char ':'))
+             d -> do fs <- pIntWithFirstDigit d
+                     ss <- char ':' *> sepBy pInt (char ':')
+                     return $ NativeIntSize $ fs : ss
+           _   -> mzero
+
+    pFunctionPointerAlignType :: Parser FunctionPointerAlignType
+    pFunctionPointerAlignType =
+      do c <- letter
+         case c of
+           'i' -> return IndependentOfFunctionAlign
+           'n' -> return MultipleOfFunctionAlign
            _   -> mzero
 
     pMangling :: Parser Mangling
@@ -350,22 +435,31 @@ parseDataLayout str =
       do c <- letter
          case c of
            'e' -> return ElfMangling
+           'l' -> return GoffMangling
            'm' -> return MipsMangling
            'o' -> return MachOMangling
            'w' -> return WindowsCoffMangling
+           'x' -> return WindowsX86CoffMangling
+           'a' -> return XCoffMangling
            _   -> mzero
+
+    pAlignment :: Parser Alignment
+    pAlignment = Alignment <$> pInt <*> pCOInt
+
+    pStorage :: Parser Storage
+    pStorage = Storage <$> pInt <* char ':' <*> pAlignment
 
     pInt :: Parser Int
     pInt = read <$> many1 digit
 
-    pInt0 :: Parser Int
-    pInt0 = pInt <|> return 0
+    pIntWithFirstDigit :: Char -> Parser Int
+    pIntWithFirstDigit d0 = read . (d0:) <$> many digit
 
     pCInt :: Parser Int
     pCInt = char ':' >> pInt
 
-    pPref :: Parser (Maybe Int)
-    pPref = optionMaybe pCInt
+    pCOInt :: Parser (Maybe Int)
+    pCOInt = optionMaybe pCInt
 
 -- Inline Assembly -------------------------------------------------------------
 
@@ -986,19 +1080,51 @@ data BitOp
 
 -- | Conversions from one type to another.
 data ConvOp
-  = Trunc
-  | ZExt
+  = Trunc Bool Bool
+    -- ^ Truncate an integer value to a smaller integer type.
+    --
+    -- The 'Bool' fields (added in in LLVM 20) encode whether to perform
+    -- overflow-related checks:
+    --
+    -- * First 'Bool': check for unsigned overflow.
+    -- * Second 'Bool': check for signed overflow.
+    --
+    -- If the checks fail, then the result is poisoned.
+    --
+    -- These fields can only ever 'True' in 'Conv' instructions in LLVM 20 or
+    -- later. These fields are always 'False' in 'ConstConv' constant
+    -- expressions or if the LLVM version is older than 20.
+  | ZExt Bool
+    -- ^ Zero extension.
+    --
+    -- The 'Bool' field (added in LLVM 18) encodes whether to enforce that the
+    -- argument is non-negative. If the 'Bool' is 'True' and the argument is
+    -- negative, then the result is poisoned.
+    --
+    -- This field can only ever 'True' in 'Conv' instructions in LLVM 18 or
+    -- later. This field is always 'False' in 'ConstConv' constant expressions
+    -- or if the LLVM version is older than 18.
   | SExt
   | FpTrunc
   | FpExt
   | FpToUi
   | FpToSi
-  | UiToFp
+  | UiToFp Bool
+    -- ^ Convert the argument from an unsigned integer to a floating-point
+    -- value.
+    --
+    -- The 'Bool' field (added in LLVM 19) encodes whether to enforce that the
+    -- argument is non-negative. If the 'Bool' is 'True' and the argument is
+    -- negative, then the result is poisoned.
+    --
+    -- This field can only ever 'True' in 'Conv' instructions in LLVM 19 or
+    -- later. This field is always 'False' in 'ConstConv' constant expressions
+    -- or if the LLVM version is older than 19.
   | SiToFp
   | PtrToInt
   | IntToPtr
   | BitCast
-    deriving (Data, Eq, Enum, Generic, Ord, Show, Typeable)
+    deriving (Data, Eq, Generic, Ord, Show, Typeable)
 
 data AtomicRWOp
   = AtomicXchg
@@ -1140,10 +1266,14 @@ data Instr' lab
          * Middle of basic block.
          * Effect. -}
 
-  | ICmp ICmpOp (Typed (Value' lab)) (Value' lab)
+  | ICmp Bool ICmpOp (Typed (Value' lab)) (Value' lab)
     {- ^ * Compare two integral values.
          * Middle of basic block.
-         * Returns a boolean value. -}
+         * Returns a boolean value.
+         * The 'Bool' field (added in LLVM 20) encodes whether to enforce that
+           the arguments have the same sign. If the 'Bool' is 'True' and the
+           arguments have mismatched signs, then the result is poisoned. This
+           field is always 'False' if the LLVM version is older than 20. -}
 
   | FCmp [FMF] FCmpOp (Typed (Value' lab)) (Value' lab)
     {- ^ * Compare two floating point values.
@@ -1157,15 +1287,18 @@ data Instr' lab
          * Returns a value of the specified type.
          * Fast-math flags are only allowed if the type is a floating-point type; see LLVM documentation. -}
 
-  | GEP Bool Type (Typed (Value' lab)) [Typed (Value' lab)]
+  | GEP [GEPAttr] Type (Typed (Value' lab)) [Typed (Value' lab)]
     {- ^ * "Get element pointer",
             compute the address of a field in a structure:
-            inbounds check (value poisoned if this fails);
+            inbounds check attr (value poisoned if this fails);
             type to use as a basis for calculations;
             pointer to parent structure;
             path to a sub-component of a structure.
          * Middle of basic block.
          * Returns the address of the requested member.
+
+    It's recommended that the GEPAttr list should be normalized (i.e. only one of
+    each entry).
 
     The types in path are the types of the index, not the fields.
 
@@ -1351,6 +1484,80 @@ data FMF
     deriving (Data, Eq, Enum, Generic, Ord, Show, Typeable)
 
 
+-- Debug Instructions ----------------------------------------------------------
+
+-- | Debug Instructions
+--
+-- In LLVM 19, debug instructions were added as a replacement for the intrinsic
+-- functions previously used.  This addition is described in
+-- llvm-project/llvm/docs/RemoveDIsDebugInfo.md in the LLVM repository.
+data DebugRecord' lab
+  = DebugRecordValue (DbgRecValue' lab)
+  | DebugRecordDeclare (DbgRecDeclare' lab)
+  | DebugRecordAssign (DbgRecAssign' lab)
+  | DebugRecordValueSimple (DbgRecValueSimple' lab)
+  | DebugRecordLabel (DbgRecLabel' lab)
+  deriving (Data, Eq, Functor, Generic, Ord, Show, Typeable)
+
+type DebugRecord = DebugRecord' BlockLabel
+
+data DbgRecValue' lab = DbgRecValue
+  {
+    drvLocation :: ValMd' lab -- ^ Expected to be a DILocation
+  , drvLocalVariable :: ValMd' lab -- ^ Expected to be a DILocalVariable
+  , drvExpression :: ValMd' lab -- ^ Expected to be a DIExpression
+  , drvValAsMetadata :: ValMd' lab
+  }
+  deriving (Data, Eq, Functor, Generic, Ord, Show, Typeable)
+
+type DbgRecValue = DbgRecValue' BlockLabel
+
+data DbgRecValueSimple' lab = DbgRecValueSimple
+  {
+    drvsLocation :: ValMd' lab -- ^ Expected to be a DILocation
+  , drvsLocalVariable :: ValMd' lab -- ^ Expected to be a DILocalVariable
+  , drvsExpression :: ValMd' lab -- ^ Expected to be a DIExpression
+  , drvsValue :: Typed (Value' lab)
+  }
+  deriving (Data, Eq, Functor, Generic, Ord, Show, Typeable)
+
+type DbgRecValueSimple = DbgRecValueSimple' BlockLabel
+
+data DbgRecDeclare' lab = DbgRecDeclare
+  {
+    drdLocation :: ValMd' lab -- ^ Expected to be a DILocation
+  , drdLocalVariable :: ValMd' lab -- ^ Expected to be a DILocalVariable
+  , drdExpression :: ValMd' lab -- ^ Expected to be a DIExpression
+  , drdValAsMetadata :: ValMd' lab
+  }
+  deriving (Data, Eq, Functor, Generic, Ord, Show, Typeable)
+
+type DbgRecDeclare = DbgRecDeclare' BlockLabel
+
+data DbgRecAssign' lab = DbgRecAssign
+  {
+    draLocation :: ValMd' lab -- ^ Expected to be a DILocation
+  , draLocalVariable :: ValMd' lab -- ^ Expected to be a DILocalVariable
+  , draExpression :: ValMd' lab -- ^ Expected to be a DIExpression
+  , draValAsMetadata :: ValMd' lab
+  , draAssignID :: ValMd' lab -- ^ Expected to be a DIAssignID
+  , draExpressionAddr :: ValMd' lab -- ^ Expected to be a DIExpression
+  , draValAsMetadataAddr :: ValMd' lab
+  }
+  deriving (Data, Eq, Functor, Generic, Ord, Show, Typeable)
+
+type DbgRecAssign = DbgRecAssign' BlockLabel
+
+data DbgRecLabel' lab = DbgRecLabel
+  {
+    drlLocation :: ValMd' lab -- ^ Expected to be a DILocation
+  , drlLabel :: ValMd' lab -- ^ Expected to be a DILabel
+  }
+  deriving (Data, Eq, Functor, Generic, Ord, Show, Typeable)
+
+type DbgRecLabel = DbgRecLabel' BlockLabel
+
+
 -- Values ----------------------------------------------------------------------
 
 data Value' lab
@@ -1402,6 +1609,8 @@ data DebugLoc' lab = DebugLoc
   , dlScope :: ValMd' lab
   , dlIA    :: Maybe (ValMd' lab)
   , dlImplicit :: Bool
+  , dlAtomGroup :: Word64 -- ^ Introduced in LLVM 21
+  , dlAtomRank :: Word64 -- ^ Introduced in LLVM 21
   } deriving (Data, Eq, Functor, Generic, Generic1, Ord, Show, Typeable)
 
 type DebugLoc = DebugLoc' BlockLabel
@@ -1429,36 +1638,66 @@ elimValInteger _              = mzero
 
 -- Statements ------------------------------------------------------------------
 
+-- | Each statement, which can return a value (`Result`) referenced by the
+-- `Ident` or else it has no return value (`Effect`).  The statement has a single
+-- Instruction, followed by any Debug Records or associated metadata.
+--
+-- See llvm-project/llvm/docs/RemoveDIsDebugInfo.md for discussion on the
+-- [DebugRecord] fields.  Note that DebugRecords and debug intrinsics may not be
+-- mixed in a module; the former is new and preferred over the latter.
+--
+-- Technically, DebugRecords are attached to Instructions, but since there's a
+-- 1:1 correspondence between Stmt and Instr, it is cleaner to attach the
+-- DebugRecords to the Stmt to keep the Instrs from getting additional
+-- complications.
+--
+-- Each statement may have both Debug Records (2nd-to-last field) and a list of
+-- metadata attributes (last field).  As noted above, bitcode file should not mix
+-- Debug Records and intrinsics; if Debug Records are used, the metadata
+-- attribute list should not contain intrinsics (although it may contain other
+-- metadata associated with this statement).
+
 data Stmt' lab
-  = Result Ident (Instr' lab) [(String,ValMd' lab)]
-  | Effect (Instr' lab) [(String,ValMd' lab)]
+  = Result Ident (Instr' lab) [DebugRecord' lab] [(String, ValMd' lab)]
+  | Effect (Instr' lab) [DebugRecord' lab] [(String, ValMd' lab)]
     deriving (Data, Eq, Functor, Generic, Generic1, Ord, Show, Typeable)
 
 type Stmt = Stmt' BlockLabel
 
+stmtMetadata :: Stmt' lab -> [(String, ValMd' lab)]
+stmtMetadata = \case
+  Result _ _ _ mds -> mds
+  Effect _ _ mds   -> mds
+
 stmtInstr :: Stmt' lab -> Instr' lab
-stmtInstr (Result _ i _) = i
-stmtInstr (Effect i _)   = i
+stmtInstr (Result _ i _ _) = i
+stmtInstr (Effect i _ _)   = i
 
-stmtMetadata :: Stmt' lab -> [(String,ValMd' lab)]
-stmtMetadata stmt = case stmt of
-  Result _ _ mds -> mds
-  Effect _ mds   -> mds
-
-extendMetadata :: (String,ValMd' lab) -> Stmt' lab -> Stmt' lab
+extendMetadata :: Show lab => (String, ValMd' lab) -> Stmt' lab -> Stmt' lab
 extendMetadata md stmt = case stmt of
-  Result r i mds -> Result r i (md:mds)
-  Effect i mds   -> Effect i (md:mds)
+  Result r i [] mds -> Result r i [] (md:mds)
+  Result _ _ _ _ -> error $ "Adding MD " <> show md <> " after DebugRecord"
+  Effect i drs mds   -> Effect i drs (md:mds)
 
+addDebugRecord :: DebugRecord' lab -> Stmt' lab -> Stmt' lab
+addDebugRecord dr = \case
+  Result r i drs mds -> Result r i (snoc dr drs) mds
+  Effect i drs mds   -> Effect i (snoc dr drs) mds
+  where
+    snoc e ls = ls <> [e]
 
 -- Constant Expressions --------------------------------------------------------
 
 data ConstExpr' lab
-  = ConstGEP Bool (Maybe Word64) Type (Typed (Value' lab)) [Typed (Value' lab)]
+  = ConstGEP [GEPAttr] (Maybe RangeSpec) Type (Typed (Value' lab)) [Typed (Value' lab)]
   -- ^ Since LLVM 3.7, constant @getelementptr@ expressions include an explicit
   -- type to use as a basis for calculations. For older versions of LLVM, this
   -- type can be reconstructed by inspecting the pointee type of the parent
   -- pointer value.
+  --
+  -- Since LLVM 19, the bool "inbounds" is now [GEPAttr] and range is via
+  -- RangeSpec instead of just Word64.  It's recommended that the GEPAttr list
+  -- should be normalized (i.e. only one of each entry).
   | ConstConv ConvOp (Typed (Value' lab)) Type
   | ConstSelect (Typed (Value' lab)) (Typed (Value' lab)) (Typed (Value' lab))
   | ConstBlockAddr (Typed (Value' lab)) lab
@@ -1471,10 +1710,63 @@ data ConstExpr' lab
 
 type ConstExpr = ConstExpr' BlockLabel
 
+-- | Attributes imposing rules on the GEP; violating any rule results in a poison
+-- value.  If the base is a vector of pointers, the attributes apply to each
+-- computation element-wise.  See
+-- https://llvm.org/docs/LangRef.html#getelementptr-instruction for more
+-- information.
+data GEPAttr
+  = GEP_Inbounds
+    -- ^ Rules:
+    -- * Base pointer has an inbounds (but not necessarily live) address of the
+    --   allocated object it is based on (i.e. points into that allocation or to
+    --   its end.  Size for a growable allocated object is the max size, not the
+    --   current size.
+    -- * Pointer must remain inbounds at all times when adding the offsets
+    -- * Implies 'GEP_NUSW'
+  | GEP_NUSW
+    -- ^ No unsigned signed wrap.
+    -- Rules:
+    -- * If type of index is larger than ptr index type, truncation preserves
+    --   the signed value.
+    -- * Multiplication of an index by the type size does not wrap in a
+    --   signed sense.
+    -- * Offset additions (excluding base address) does not wrap in a
+    --   signed sense
+    -- * Addition of the current address (as unsigned, truncated to ptr
+    --   index type) and each offset (as signed) does not wrap the ptr
+    --   index type.
+  | GEP_NUW
+    -- ^ No unsigned wrap
+    -- Rules:
+    -- * If type of index is larger than ptr index type, truncation preserves
+    --   the unsigned value.
+    -- * Multiplication of an index by the type size does not wrap in an
+    --   unsigned sense.
+    -- * Offset additions (excluding base address) does not wrap in an
+    --   unsigned sense
+    -- * Addition of the current address (as unsigned, truncated to ptr
+    --   index type) and each offset (as unsigned) does not wrap the ptr
+    --   index type.
+    deriving (Data, Eq, Generic, Ord, Show, Typeable)
+
+orderedGEPAttrs :: [GEPAttr]
+orderedGEPAttrs = [GEP_Inbounds, GEP_NUSW, GEP_NUW] -- bit0, bit1, ...
+
+data RangeSpec
+  = RangeIndex Word64
+    -- ^ index of valid range as used in pre-LLVM19 for when "inbounds" as a
+    -- boolean was True.  Deprecated.
+  | Range Int Integer Integer
+    -- ^ width of arbitrary-precision integer (in bits) and lower and upper
+    -- arbitrary-precision integer bounds of that size as [lower, upper).
+  deriving (Data, Eq, Generic, Ord, Show, Typeable)
+
+
 -- DWARF Debug Info ------------------------------------------------------------
 
 data DebugInfo' lab
-  = DebugInfoBasicType DIBasicType
+  = DebugInfoBasicType (DIBasicType' lab)
   | DebugInfoCompileUnit (DICompileUnit' lab)
   | DebugInfoCompositeType (DICompositeType' lab)
   | DebugInfoDerivedType (DIDerivedType' lab)
@@ -1496,8 +1788,7 @@ data DebugInfo' lab
   | DebugInfoImportedEntity (DIImportedEntity' lab)
   | DebugInfoLabel (DILabel' lab)
   | DebugInfoArgList (DIArgList' lab)
-  | DebugInfoAssignID
-    -- ^ Introduced in LLVM 17.
+  | DebugInfoAssignID -- ^ Introduced in LLVM 17.
     deriving (Data, Eq, Functor, Generic, Generic1, Ord, Show, Typeable)
 
 type DebugInfo = DebugInfo' BlockLabel
@@ -1508,6 +1799,9 @@ data DILabel' lab = DILabel
     , dilName  :: String
     , dilFile  :: Maybe (ValMd' lab)
     , dilLine  :: Word32
+    , dilColumn :: Word32 -- ^ Introduced in LLVM 21.
+    , dilIsArtificial :: Bool -- ^ Introduced in LLVM 21.
+    , dilCoroSuspendIdx :: Maybe Word32 -- ^ Introduced in LLVM 21.
     } deriving (Data, Eq, Functor, Generic, Generic1, Ord, Show, Typeable)
 
 type DIImportedEntity = DIImportedEntity' BlockLabel
@@ -1557,14 +1851,26 @@ type DIFlags = Word32
 -- it stabilizes.
 type DIEmissionKind = Word8
 
-data DIBasicType = DIBasicType
+-- See https://github.com/llvm/llvm-project/commit/eb8901bda11fd55deeecd067fc4c9dcc0fb89984
+dwarf_DW_APPLE_ENUM_KIND_invalid :: Word32
+dwarf_DW_APPLE_ENUM_KIND_invalid = complement (0 :: Word32) -- ~ LLVM 19
+
+data DIBasicType' lab = DIBasicType
   { dibtTag      :: DwarfTag
   , dibtName     :: String
-  , dibtSize     :: Word64
+  , dibtSize     :: Maybe (ValMd' lab)
+    -- ^ If using LLVM 20 or older, this will always be @Just@ an 'ValMdValue',
+    -- where the underlying value is a 64-bit 'ValInteger'. If using LLVM 21 or
+    -- later, this can also be a null reference (i.e., 'Nothing'), a variable
+    -- (i.e., @Just@ a 'DIGlobalVariable' or 'DILocalVariable'), or an
+    -- expression (i.e., @Just@ a 'DIExpression').
   , dibtAlign    :: Word64
   , dibtEncoding :: DwarfAttrEncoding
   , dibtFlags    :: Maybe DIFlags
-  } deriving (Data, Eq, Generic, Ord, Show, Typeable)
+  , dibtNumExtraInhabitants :: Word64 -- ^ added in LLVM 20.
+  } deriving (Data, Eq, Functor, Generic, Ord, Show, Typeable)
+
+type DIBasicType = DIBasicType' BlockLabel
 
 data DICompileUnit' lab = DICompileUnit
   { dicuLanguage           :: DwarfLang
@@ -1600,9 +1906,19 @@ data DICompositeType' lab = DICompositeType
   , dictLine           :: Word32
   , dictScope          :: Maybe (ValMd' lab)
   , dictBaseType       :: Maybe (ValMd' lab)
-  , dictSize           :: Word64
+  , dictSize           :: Maybe (ValMd' lab)
+    -- ^ If using LLVM 20 or older, this will always be @Just@ an 'ValMdValue',
+    -- where the underlying value is a 64-bit 'ValInteger'. If using LLVM 21 or
+    -- later, this can also be a null reference (i.e., 'Nothing'), a variable
+    -- (i.e., @Just@ a 'DIGlobalVariable' or 'DILocalVariable'), or an
+    -- expression (i.e., @Just@ a 'DIExpression').
   , dictAlign          :: Word64
-  , dictOffset         :: Word64
+  , dictOffset         :: Maybe (ValMd' lab)
+    -- ^ If using LLVM 20 or older, this will always be @Just@ an 'ValMdValue',
+    -- where the underlying value is a 64-bit 'ValInteger'. If using LLVM 21 or
+    -- later, this can also be a null reference (i.e., 'Nothing'), a variable
+    -- (i.e., @Just@ a 'DIGlobalVariable' or 'DILocalVariable'), or an
+    -- expression (i.e., @Just@ a 'DIExpression').
   , dictFlags          :: DIFlags
   , dictElements       :: Maybe (ValMd' lab)
   , dictRuntimeLang    :: DwarfLang
@@ -1614,8 +1930,11 @@ data DICompositeType' lab = DICompositeType
   , dictAssociated     :: Maybe (ValMd' lab)
   , dictAllocated      :: Maybe (ValMd' lab)
   , dictRank           :: Maybe (ValMd' lab)
-  , dictAnnotations    :: Maybe (ValMd' lab)
-    -- ^ Introduced in LLVM 14.
+  , dictAnnotations    :: Maybe (ValMd' lab) -- ^ Introduced in LLVM 14.
+  , dictNumExtraInhabitants :: Word64        -- ^ added in LLVM 20.
+  , dictSpecification  :: Maybe (ValMd' lab) -- ^ added in LLVM 20.
+  , dictEnumKind       :: Maybe Word32       -- ^ added in LLVM 20.
+  , dictBitStride      :: Maybe (ValMd' lab) -- ^ added in LLVM 20.
   } deriving (Data, Eq, Functor, Generic, Generic1, Ord, Show, Typeable)
 
 type DICompositeType = DICompositeType' BlockLabel
@@ -1627,9 +1946,19 @@ data DIDerivedType' lab = DIDerivedType
   , didtLine :: Word32
   , didtScope :: Maybe (ValMd' lab)
   , didtBaseType :: Maybe (ValMd' lab)
-  , didtSize :: Word64
+  , didtSize :: Maybe (ValMd' lab)
+    -- ^ If using LLVM 20 or older, this will always be @Just@ an 'ValMdValue',
+    -- where the underlying value is a 64-bit 'ValInteger'. If using LLVM 21 or
+    -- later, this can also be a null reference (i.e., 'Nothing'), a variable
+    -- (i.e., @Just@ a 'DIGlobalVariable' or 'DILocalVariable'), or an
+    -- expression (i.e., @Just@ a 'DIExpression').
   , didtAlign :: Word64
-  , didtOffset :: Word64
+  , didtOffset :: Maybe (ValMd' lab)
+    -- ^ If using LLVM 20 or older, this will always be @Just@ an 'ValMdValue',
+    -- where the underlying value is a 64-bit 'ValInteger'. If using LLVM 21 or
+    -- later, this can also be a null reference (i.e., 'Nothing'), a variable
+    -- (i.e., @Just@ a 'DIGlobalVariable' or 'DILocalVariable'), or an
+    -- expression (i.e., @Just@ a 'DIExpression').
   , didtFlags :: DIFlags
   , didtExtraData :: Maybe (ValMd' lab)
   , didtDwarfAddressSpace :: Maybe Word32
